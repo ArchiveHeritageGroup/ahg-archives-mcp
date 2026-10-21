@@ -4,7 +4,7 @@ Hidden = draft, under an active embargo, security-classified, or under an ICIP
 restriction. For each one (up to a cap) the test asks the running service, the
 way an assistant would:
 
-  - get_record and get_iiif_manifest must answer "not found";
+  - get_record, get_iiif_manifest and get_record_text must answer "not found";
   - a search for its exact title must not return it;
   - get_children of its parent must not list it;
   - no visible descendant may name it in its hierarchy ("part_of").
@@ -81,7 +81,7 @@ async def main() -> int:
 
             for io_id, slug, title, parent_id, why in hidden:
                 label = f"{why} {slug}"
-                for tool in ("get_record", "get_iiif_manifest"):
+                for tool in ("get_record", "get_iiif_manifest", "get_record_text"):
                     checks += 1
                     if (await call(s, tool, slug=slug)).get("found"):
                         failures.append(f"{label}: {tool} returned it")

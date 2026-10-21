@@ -328,7 +328,7 @@ def get_record_text(slug: str, offset: int = 0, limit: int = 20000, ctx: Context
     def run():
         if BACKEND != "atom-ahg":
             return {"found": False, "message": "This catalogue's API does not publish file text.", "source": SOURCE}
-        d = _api("GET", f"/descriptions/{slug}/text", key, params={"offset": max(0, int(offset)), "limit": max(1, min(int(limit), 50000))})
+        d = _api("GET", f"/descriptions/{slug}/text", key, params={"start": max(0, int(offset)), "chars": max(1, min(int(limit), 50000))})
         texts = d.get("texts", [])
         if not texts:
             return {"found": True, "source": SOURCE, "url": _url(slug), "results": [],
