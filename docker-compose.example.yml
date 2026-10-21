@@ -1,0 +1,17 @@
+# Example only. Copy to docker-compose.yml and put the key in a .env file
+# (PSIS_API_KEY=...), which must never be committed.
+services:
+  glam-mcp:
+    build: .
+    image: ahg/glam-mcp:phase1
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8031:8000"   # nginx publishes it over HTTPS
+    environment:
+      PSIS_API_BASE: https://psis.theahg.co.za/api/v2
+      PSIS_PUBLIC_BASE: https://psis.theahg.co.za
+      GLAM_SOURCE_LABEL: "PSIS - AHG Extensions for AtoM demonstration catalogue"
+      GLAM_CALL_LOG: /logs/calls.jsonl
+      PSIS_API_KEY: ${PSIS_API_KEY}
+    volumes:
+      - ./logs:/logs

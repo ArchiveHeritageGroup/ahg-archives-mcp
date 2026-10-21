@@ -1,0 +1,4 @@
+# ponytail: pinned to the 1.x SDK (FastMCP). mcp 2.x renames FastMCP to MCPServer;
+# move when there is a reason to, it is a contained change in server.py.
+mcp[cli]>=1.30,<2
+httpx>=0.28,<1
