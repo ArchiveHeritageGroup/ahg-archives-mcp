@@ -49,6 +49,36 @@ log = logging.getLogger("glam-mcp.calls")
 log.setLevel(logging.INFO)
 log.addHandler(logging.FileHandler(CALL_LOG) if CALL_LOG else logging.StreamHandler())
 
+# GLAM_AUTH=oauth: the signed-in service (browser assistants sign in, desktop
+# clients may send their catalogue key as a bearer). GLAM_AUTH=off: the public,
+# read-only service, which never uses a caller key.
+AUTH_MODE = os.environ.get("GLAM_AUTH", "off")
+MCP_BASE = os.environ.get("GLAM_PUBLIC_BASE", "https://mcp.theahg.co.za").rstrip("/")
+HTTP_PATH = os.environ.get("GLAM_HTTP_PATH", "/mcp")
+_auth_kwargs: dict = {}
+_provider = None
+if AUTH_MODE == "oauth":
+    from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
+    from glam_mcp.auth import CatalogueKeyChecker, CatalogueKeyOAuthProvider, Store
+    _secret = os.environ.get("GLAM_SECRET", "")
+    if not _secret:
+        raise SystemExit("GLAM_AUTH=oauth needs GLAM_SECRET (a Fernet key)")
+    _store = Store(os.path.join(os.environ.get("GLAM_DATA", "/data"), "oauth.db"), _secret)
+    _checker = CatalogueKeyChecker(API_BASE, "X-API-Key" if BACKEND == "atom-ahg" else "REST-API-Key",
+                                   "AHG-GLAM-MCP/0.3 (+https://www.atom-extensions.com)",
+                                   "/descriptions?limit=1" if BACKEND == "atom-ahg" else "/informationobjects?limit=1")
+    _provider = CatalogueKeyOAuthProvider(_store, _checker, MCP_BASE, SOURCE, PUBLIC_BASE + "/api/keys")
+    _auth_kwargs = {
+        "auth_server_provider": _provider,
+        "auth": AuthSettings(
+            issuer_url=MCP_BASE, resource_server_url=MCP_BASE + HTTP_PATH,
+            client_registration_options=ClientRegistrationOptions(enabled=True),
+            revocation_options=RevocationOptions(enabled=True),
+        ),
+    }
+elif AUTH_MODE != "off":
+    raise SystemExit(f"GLAM_AUTH must be oauth or off, not {AUTH_MODE!r}")
+
 mcp = FastMCP(
     "AHG Archives",
     instructions=(
@@ -61,8 +91,14 @@ mcp = FastMCP(
     ),
     host=os.environ.get("GLAM_HOST", "0.0.0.0"),
     port=int(os.environ.get("GLAM_PORT", "8000")),
+    streamable_http_path=HTTP_PATH,
     stateless_http=True,
+    **_auth_kwargs,
 )
+
+if _provider is not None:
+    mcp.custom_route("/login", methods=["GET"])(_provider.login_get)
+    mcp.custom_route("/login", methods=["POST"])(_provider.login_post)
 
 # PSIS's nginx drops requests from generic client user agents (bot protection),
 # so the service names itself.
@@ -86,14 +122,16 @@ class Refused(Exception):
 
 
 def _caller_key(ctx: Context | None) -> str | None:
-    """The archivist's own key, if their assistant sent one."""
-    try:
-        auth = ctx.request_context.request.headers.get("authorization", "")  # type: ignore[union-attr]
-    except Exception:
+    """The catalogue key of the signed-in user, or None on the public service.
+
+    The bearer has already been checked by the auth middleware: it is either one
+    of our OAuth tokens (mapped to the key the user gave at sign-in) or a
+    catalogue key sent directly by a desktop client.
+    """
+    if _provider is None:
         return None
-    if not auth.lower().startswith("bearer "):
-        return None
-    return auth[7:].strip() or None
+    from mcp.server.auth.middleware.auth_context import get_access_token
+    return _provider.catalogue_key_for(get_access_token())
 
 
 def _api(method: str, path: str, key: str | None = None, **kw) -> Any:
@@ -124,7 +162,7 @@ def _logged(tool: str, args: dict, ctx: Context | None, fn):
         return {"found": False, "message": "No visible record with that reference.", "source": SOURCE}
     except NeedsCallerKey:
         outcome = "needs_key"
-        return {"found": False, "message": "Proposing changes needs your own staff API key, sent by your assistant as 'Authorization: Bearer <key>'.", "source": SOURCE}
+        return {"found": False, "message": "Proposing changes needs you to be signed in. Connect to https://mcp.theahg.co.za/mcp and sign in with your catalogue API key; the public read-only address cannot propose.", "source": SOURCE}
     except Refused as e:
         outcome = "refused"
         return {"found": False, "message": e.message, "source": SOURCE}
@@ -376,7 +414,7 @@ async def healthz(request: Request) -> JSONResponse:
         ok = r.status_code < 500
     except Exception:
         ok = False
-    return JSONResponse({"status": "ok" if ok else "degraded", "backend": BACKEND, "source": SOURCE, "api": ok}, status_code=200 if ok else 503)
+    return JSONResponse({"status": "ok" if ok else "degraded", "backend": BACKEND, "auth": AUTH_MODE, "source": SOURCE, "api": ok}, status_code=200 if ok else 503)
 
 
 def main() -> None:

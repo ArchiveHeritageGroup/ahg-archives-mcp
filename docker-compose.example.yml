@@ -1,17 +1,45 @@
-# Example only. Copy to docker-compose.yml and put the key in a .env file
-# (PSIS_API_KEY=...), which must never be committed.
+# Example only. Copy to docker-compose.yml. Secrets go in .env, which must never be
+# committed: PSIS_API_KEY (the read-only service user's key) and GLAM_SECRET (a Fernet
+# key; generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())").
+#
+# Two services from one image:
+#   glam-mcp-public  read-only, no sign-in        -> https://mcp.theahg.co.za/public/mcp
+#   glam-mcp         OAuth sign-in or staff key    -> https://mcp.theahg.co.za/mcp
+x-common: &common
+  build: .
+  image: ahg/glam-mcp:phase2
+  restart: unless-stopped
+  user: "1000:1000"   # the host account that owns ./logs and ./data
+  volumes:
+    - ./logs:/logs
+    - ./data:/data
+
 services:
-  glam-mcp:
-    build: .
-    image: ahg/glam-mcp:phase1
-    restart: unless-stopped
+  glam-mcp-public:
+    <<: *common
     ports:
-      - "127.0.0.1:8031:8000"   # nginx publishes it over HTTPS
+      - "127.0.0.1:8032:8000"
+    environment:
+      PSIS_API_BASE: https://psis.theahg.co.za/api/v2
+      PSIS_PUBLIC_BASE: https://psis.theahg.co.za
+      GLAM_SOURCE_LABEL: "PSIS - AHG Extensions for AtoM demonstration catalogue"
+      GLAM_CALL_LOG: /logs/calls-public.jsonl
+      GLAM_AUTH: "off"
+      GLAM_HTTP_PATH: /public/mcp
+      PSIS_API_KEY: ${PSIS_API_KEY}
+
+  glam-mcp:
+    <<: *common
+    ports:
+      - "127.0.0.1:8031:8000"
     environment:
       PSIS_API_BASE: https://psis.theahg.co.za/api/v2
       PSIS_PUBLIC_BASE: https://psis.theahg.co.za
       GLAM_SOURCE_LABEL: "PSIS - AHG Extensions for AtoM demonstration catalogue"
       GLAM_CALL_LOG: /logs/calls.jsonl
+      GLAM_AUTH: oauth
+      GLAM_PUBLIC_BASE: https://mcp.theahg.co.za
+      GLAM_HTTP_PATH: /mcp
+      GLAM_DATA: /data
+      GLAM_SECRET: ${GLAM_SECRET}
       PSIS_API_KEY: ${PSIS_API_KEY}
-    volumes:
-      - ./logs:/logs
