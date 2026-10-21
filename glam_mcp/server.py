@@ -86,7 +86,7 @@ mcp = FastMCP(
         f"Search and read archival descriptions held in the {SOURCE}. Always cite the record URL "
         "given in each result, and say which institution the record comes from. To suggest access "
         "points (people, organisations, places) and dates for a record, read it with get_record, "
-        "base every suggestion on its text (and, where its text is thin, on what get_record_image shows), and call propose_access_points_and_dates; for text fields call "
+        "base every suggestion on its text (and, where its text is thin, on the file's text from get_record_text or what get_record_image shows), and call propose_access_points_and_dates; for text fields call "
         "propose_description_change. Give evidence and source URLs for everything, especially facts "
         "found on the web. Proposals are reviewed by an archivist; never describe them as saved."
     ),
@@ -310,6 +310,31 @@ def get_iiif_manifest(slug: str, ctx: Context | None = None) -> dict:
         manifest = f"{PUBLIC_BASE}/iiif/manifest/{slug}"
         return {"found": True, "source": SOURCE, "url": _url(slug), "title": rec["title"], "iiif_manifest": manifest}
     return _logged("get_iiif_manifest", {"slug": slug}, ctx, run)
+
+
+@mcp.tool()
+def get_record_text(slug: str, offset: int = 0, limit: int = 20000, ctx: Context | None = None) -> dict:
+    """Read the text held for a record's files: text extracted from a PDF or by OCR,
+    and transcriptions of audio or video.
+
+    Use it for documents, where reading the text beats looking at a small image.
+    Long text comes in pages: if a result says more=true, call again with
+    offset set to offset + the length you received. Personal information may be
+    masked. Quote what you rely on when you propose changes.
+    """
+    key = _caller_key(ctx)
+    args = {"slug": slug, "offset": offset, "limit": limit}
+
+    def run():
+        if BACKEND != "atom-ahg":
+            return {"found": False, "message": "This catalogue's API does not publish file text.", "source": SOURCE}
+        d = _api("GET", f"/descriptions/{slug}/text", key, params={"offset": max(0, int(offset)), "limit": max(1, min(int(limit), 50000))})
+        texts = d.get("texts", [])
+        if not texts:
+            return {"found": True, "source": SOURCE, "url": _url(slug), "results": [],
+                    "message": d.get("note") or "No text is held for this record's files. For an image, use get_record_image."}
+        return {"found": True, "source": SOURCE, "url": _url(slug), "results": texts}
+    return _logged("get_record_text", args, ctx, run)
 
 
 MAX_IMAGE_BYTES = 3_000_000
