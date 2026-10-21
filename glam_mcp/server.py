@@ -25,10 +25,11 @@ import json
 import logging
 import os
 import time
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from mcp.server.fastmcp import Context, FastMCP
+from pydantic import BaseModel, Field
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -54,8 +55,9 @@ mcp = FastMCP(
         f"Search and read archival descriptions held in the {SOURCE}. Always cite the record URL "
         "given in each result, and say which institution the record comes from. To suggest access "
         "points (people, organisations, places) and dates for a record, read it with get_record, "
-        "base every suggestion on its text, and call propose_access_points_and_dates. Proposals are "
-        "reviewed by an archivist; never describe them as saved to the record."
+        "base every suggestion on its text, and call propose_access_points_and_dates; for text fields call "
+        "propose_description_change. Give evidence and source URLs for everything, especially facts "
+        "found on the web. Proposals are reviewed by an archivist; never describe them as saved."
     ),
     host=os.environ.get("GLAM_HOST", "0.0.0.0"),
     port=int(os.environ.get("GLAM_PORT", "8000")),
@@ -273,39 +275,41 @@ def get_iiif_manifest(slug: str, ctx: Context | None = None) -> dict:
 
 # ── Proposals ───────────────────────────────────────────────────────────────
 
-@mcp.tool()
-def propose_access_points_and_dates(
-    slug: str,
-    people: list[str] | None = None,
-    organisations: list[str] | None = None,
-    places: list[str] | None = None,
-    dates: list[str] | None = None,
-    evidence: str = "",
-    ctx: Context | None = None,
-) -> dict:
-    """Propose access points and dates for one record, for an archivist to review.
+class Proposal(BaseModel):
+    kind: Literal["person", "organisation", "place", "date"]
+    value: str = Field(description='As it should appear: a name, a place, or a date such as "1954" or "1938-1945".')
+    evidence: str = Field("", description="Where in the record, or which source, supports it.")
+    sources: list[str] = Field(default_factory=list, description="URLs of web sources used, if any.")
 
-    Read the record with get_record first and propose only what its text
-    supports. people / organisations / places: names as they should appear as
-    access points. dates: as written or normalised, e.g. "1942" or "1938-1945".
-    evidence: a short note on where in the record each suggestion comes from.
 
-    Nothing on the record changes. On AtoM with the AHG extensions the proposals
-    are queued in AI > Review; on stock AtoM they are returned for the archivist
-    to apply. Needs the archivist's own staff key.
-    """
+def _needs_key(ctx: Context | None) -> str:
     key = _caller_key(ctx)
-    groups = {"person": people, "organisation": organisations, "place": places, "date": dates}
-    entities = [{"type": ENTITY_TYPES[k], "value": v.strip()} for k, vals in groups.items() for v in (vals or []) if v and v.strip()]
-    args = {"slug": slug, "count": len(entities)}
+    if not key:
+        raise NeedsCallerKey()
+    return key
+
+
+@mcp.tool()
+def propose_access_points_and_dates(slug: str, proposals: list[Proposal], ctx: Context | None = None) -> dict:
+    """Propose access points (people, organisations, places) and dates for one record.
+
+    Read the record with get_record first. Propose only what its text, or a
+    reliable source you name, supports; give the evidence and source URLs for
+    each. Nothing on the record changes: an archivist reviews every proposal.
+    On AtoM with the AHG extensions they are queued in AI > NER review; on stock
+    AtoM they are returned for the archivist to apply. Needs the archivist's own
+    staff key.
+    """
+    args = {"slug": slug, "count": len(proposals)}
 
     def run():
-        if not key:
-            raise NeedsCallerKey()
-        if not entities:
+        key = _needs_key(ctx)
+        items = [p for p in proposals if p.value.strip()]
+        if not items:
             return {"queued": [], "message": "Nothing to propose.", "source": SOURCE}
         if BACKEND == "atom-ahg":
-            out = _api("POST", f"/descriptions/{slug}/proposals", key, json={"entities": entities, "source": "glam-mcp"})
+            out = _api("POST", f"/descriptions/{slug}/proposals", key, json={"source": "glam-mcp", "entities": [
+                {"type": ENTITY_TYPES[p.kind], "value": p.value.strip(), "evidence": p.evidence, "sources": p.sources} for p in items]})
             return {
                 "source": SOURCE, "url": _url(slug), "queued": out.get("queued", []),
                 "already_proposed_or_linked": out.get("skipped_existing", 0),
@@ -315,11 +319,54 @@ def propose_access_points_and_dates(
             }
         _read_base(slug, key)  # the record exists and this key may read it
         return {
-            "source": SOURCE, "url": _url(slug), "applied": False, "proposals": entities, "evidence": evidence,
+            "source": SOURCE, "url": _url(slug), "applied": False, "proposals": [p.model_dump() for p in items],
             "message": "This catalogue's API cannot add access points or dates without overwriting existing ones, "
                        "so nothing was saved. Apply these on the record's edit screen.",
         }
     return _logged("propose_access_points_and_dates", args, ctx, run)
+
+
+@mcp.tool()
+def propose_description_change(
+    slug: str,
+    field: Literal["scope_and_content", "archival_history", "extent_and_medium", "arrangement", "access_conditions", "reproduction_conditions"],
+    text: str,
+    evidence: str = "",
+    sources: list[str] | None = None,
+    ctx: Context | None = None,
+) -> dict:
+    """Propose new text for one field of a record, for an archivist to review.
+
+    text is the complete proposed text for the field, not a fragment: read the
+    record with get_record first and keep what is right in the current text.
+    Give the evidence and the URLs of any web sources. Nothing on the record
+    changes: on AtoM with the AHG extensions the proposal is queued in AI >
+    Suggest review, where the archivist can edit it before approving; on stock
+    AtoM it is returned for the archivist to apply. Needs the archivist's own
+    staff key.
+    """
+    args = {"slug": slug, "field": field, "chars": len(text)}
+
+    def run():
+        key = _needs_key(ctx)
+        if not text.strip():
+            return {"queued": False, "message": "Nothing to propose.", "source": SOURCE}
+        if BACKEND == "atom-ahg":
+            out = _api("POST", f"/descriptions/{slug}/proposals", key, json={"source": "glam-mcp", "fields": [
+                {"field": field, "text": text, "evidence": evidence, "sources": sources or []}]})
+            queued = bool(out.get("fields_queued"))
+            return {
+                "source": SOURCE, "url": _url(slug), "field": field, "queued": queued,
+                "review_url": PUBLIC_BASE + "/ai/suggest/review",
+                "message": ("Queued for review. The archivist can edit it before approving; nothing changes until then."
+                            if queued else "Nothing new to queue: the same text is already waiting for review."),
+            }
+        _read_base(slug, key)
+        return {
+            "source": SOURCE, "url": _url(slug), "applied": False, "field": field, "text": text, "evidence": evidence, "sources": sources or [],
+            "message": "Nothing was saved. Apply this on the record's edit screen.",
+        }
+    return _logged("propose_description_change", args, ctx, run)
 
 
 @mcp.custom_route("/healthz", methods=["GET"])
