@@ -29,6 +29,7 @@ from typing import Any, Literal
 
 import httpx
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.fastmcp.utilities.types import Image
 from pydantic import BaseModel, Field
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -85,7 +86,7 @@ mcp = FastMCP(
         f"Search and read archival descriptions held in the {SOURCE}. Always cite the record URL "
         "given in each result, and say which institution the record comes from. To suggest access "
         "points (people, organisations, places) and dates for a record, read it with get_record, "
-        "base every suggestion on its text, and call propose_access_points_and_dates; for text fields call "
+        "base every suggestion on its text (and, where its text is thin, on what get_record_image shows), and call propose_access_points_and_dates; for text fields call "
         "propose_description_change. Give evidence and source URLs for everything, especially facts "
         "found on the web. Proposals are reviewed by an archivist; never describe them as saved."
     ),
@@ -311,6 +312,51 @@ def get_iiif_manifest(slug: str, ctx: Context | None = None) -> dict:
     return _logged("get_iiif_manifest", {"slug": slug}, ctx, run)
 
 
+MAX_IMAGE_BYTES = 3_000_000
+
+
+@mcp.tool()
+def get_record_image(slug: str, ctx: Context | None = None) -> list:
+    """Look at a record's image: returns the reference image itself, so you can
+    describe what it shows, read inscriptions or labels, or judge its condition.
+
+    Use it before proposing a description for a record whose own text is thin.
+    Only images the caller may view are returned (the reference copy, never the
+    master). Say what you saw and what you inferred, and treat inscriptions you
+    cannot read clearly as uncertain.
+    """
+    key = _caller_key(ctx)
+    start = time.time()
+    outcome, out = "ok", None
+    try:
+        if BACKEND != "atom-ahg":
+            outcome = "unsupported"
+            return ["This catalogue's API does not publish record images."]
+        rec = _read_ahg(slug, key)  # the API decides whether this caller may see the record and its files
+        ref = next((i.get("reference") or i.get("thumbnail") for i in rec["images"] if i.get("reference") or i.get("thumbnail")), None)
+        if not ref:
+            outcome = "no_image"
+            return [f"{rec['title']} ({rec['url']}) has no image you may view."]
+        r = _client.get(ref, headers={"Accept": "image/*"})
+        r.raise_for_status()
+        if len(r.content) > MAX_IMAGE_BYTES:
+            outcome = "too_large"
+            return [f"The image for {rec['title']} is too large to show here; open it at {ref}"]
+        fmt = (r.headers.get("content-type", "image/jpeg").split("/")[-1].split(";")[0] or "jpeg").replace("jpg", "jpeg")
+        out = len(r.content)
+        return [json.dumps({"source": SOURCE, "url": rec["url"], "title": rec["title"], "image": ref}), Image(data=r.content, format=fmt)]
+    except NotVisible:
+        outcome = "not_found"
+        return ["No visible record with that reference."]
+    except Exception as e:
+        outcome = "error:" + type(e).__name__
+        return ["The image could not be fetched. Try again later."]
+    finally:
+        log.info(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "tool": "get_record_image", "args": {"slug": slug},
+                             "caller": "own-key" if key else "public", "outcome": outcome, "bytes": out,
+                             "ms": int((time.time() - start) * 1000)}))
+
+
 # ── Proposals ───────────────────────────────────────────────────────────────
 
 class Proposal(BaseModel):
@@ -367,7 +413,7 @@ def propose_access_points_and_dates(slug: str, proposals: list[Proposal], ctx: C
 @mcp.tool()
 def propose_description_change(
     slug: str,
-    field: Literal["scope_and_content", "archival_history", "extent_and_medium", "arrangement", "access_conditions", "reproduction_conditions"],
+    field: Literal["title", "scope_and_content", "archival_history", "extent_and_medium", "arrangement", "access_conditions", "reproduction_conditions"],
     text: str,
     evidence: str = "",
     sources: list[str] | None = None,
@@ -377,6 +423,7 @@ def propose_description_change(
 
     text is the complete proposed text for the field, not a fragment: read the
     record with get_record first and keep what is right in the current text.
+    For a title, propose the title only (at most 1,024 characters).
     Give the evidence and the URLs of any web sources. Nothing on the record
     changes: on AtoM with the AHG extensions the proposal is queued in AI >
     Suggest review, where the archivist can edit it before approving; on stock
