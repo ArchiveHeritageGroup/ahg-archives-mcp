@@ -1,10 +1,12 @@
-# Example only. Copy to docker-compose.yml. Secrets go in .env, which must never be
-# committed: PSIS_API_KEY (the read-only service user's key) and GLAM_SECRET (a Fernet
-# key; generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())").
+# Example only. Copy to docker-compose.yml (git-ignored) and replace every
+# example.org address with your own. Secrets go in .env, which must never be
+# committed: CATALOGUE_API_KEY (a read-only service user's key) and MCP_SECRET
+# (a Fernet key; generate with:
+#   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())").
 #
 # Two services from one image:
-#   glam-mcp-public  read-only, no sign-in        -> https://mcp.theahg.co.za/public/mcp
-#   glam-mcp         OAuth sign-in or staff key    -> https://mcp.theahg.co.za/mcp
+#   mcp-public  read-only, no sign-in     -> https://mcp.example.org/public/mcp
+#   mcp         OAuth sign-in or staff key -> https://mcp.example.org/mcp
 x-common: &common
   build: .
   image: ahg/glam-mcp:phase2
@@ -14,32 +16,34 @@ x-common: &common
     - ./logs:/logs
     - ./data:/data
 
+x-catalogue: &catalogue
+  GLAM_BACKEND: atom-ahg                          # atom-ahg (AHG Extensions) or atom-base (stock AtoM)
+  CATALOGUE_URL: https://catalogue.example.org    # your catalogue's public address
+  CATALOGUE_API_URL: https://catalogue.example.org/api/v2   # /api for atom-base
+  CATALOGUE_NAME: "Example Archive catalogue"     # how answers name the catalogue
+  CATALOGUE_API_KEY: ${CATALOGUE_API_KEY}
+
 services:
-  glam-mcp-public:
+  mcp-public:
     <<: *common
     ports:
       - "127.0.0.1:8032:8000"
     environment:
-      PSIS_API_BASE: https://psis.theahg.co.za/api/v2
-      PSIS_PUBLIC_BASE: https://psis.theahg.co.za
-      GLAM_SOURCE_LABEL: "PSIS - AHG Extensions for AtoM demonstration catalogue"
-      GLAM_CALL_LOG: /logs/calls-public.jsonl
+      <<: *catalogue
       GLAM_AUTH: "off"
       GLAM_HTTP_PATH: /public/mcp
-      PSIS_API_KEY: ${PSIS_API_KEY}
+      GLAM_CALL_LOG: /logs/calls-public.jsonl
+      MCP_SIGNED_IN_URL: https://mcp.example.org/mcp
 
-  glam-mcp:
+  mcp:
     <<: *common
     ports:
       - "127.0.0.1:8031:8000"
     environment:
-      PSIS_API_BASE: https://psis.theahg.co.za/api/v2
-      PSIS_PUBLIC_BASE: https://psis.theahg.co.za
-      GLAM_SOURCE_LABEL: "PSIS - AHG Extensions for AtoM demonstration catalogue"
-      GLAM_CALL_LOG: /logs/calls.jsonl
+      <<: *catalogue
       GLAM_AUTH: oauth
-      GLAM_PUBLIC_BASE: https://mcp.theahg.co.za
       GLAM_HTTP_PATH: /mcp
+      GLAM_CALL_LOG: /logs/calls.jsonl
       GLAM_DATA: /data
-      GLAM_SECRET: ${GLAM_SECRET}
-      PSIS_API_KEY: ${PSIS_API_KEY}
+      MCP_PUBLIC_URL: https://mcp.example.org
+      GLAM_SECRET: ${MCP_SECRET}

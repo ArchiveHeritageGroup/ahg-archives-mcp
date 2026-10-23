@@ -26,37 +26,50 @@ What a caller sees follows AtoM's own permissions: unpublished records, hidden c
 - **Heratio** (planned, heratio#1558): Heratio's REST API v2 has the same shape. Once it gains the proposals and record-text endpoints and returns provenance in the full record, the `atom-ahg` backend serves Heratio too.
 - **`atom-base`**: stock AtoM, through its own REST API. Read tools work; proposals are returned to the assistant for the archivist to apply by hand, because the stock API cannot add access points without overwriting them.
 
-## Running it
+## Install for your own catalogue
 
-Docker, one image, two services: a read-only public endpoint with no sign-in, and a signed-in endpoint where each person uses their own catalogue key (through OAuth sign-in, so it works with assistants that connect by URL).
+The server runs beside your catalogue, on your own address, and talks to it only through its API. Nothing points at AHG's hosted service unless you set it to.
 
-```bash
-cp docker-compose.example.yml docker-compose.yml   # edit the catalogue addresses
-cat > .env <<'EOF'
-PSIS_API_KEY=<read-only service user's API key>
-GLAM_SECRET=<Fernet key>
-EOF
-docker build -t ahg/glam-mcp:phase2 .
-docker compose up -d
-```
+1. On the catalogue, create a read-only user for the public endpoint and give it an API key. People who will propose changes use their own staff keys.
+2. Copy `docker-compose.example.yml` to `docker-compose.yml` and replace every `example.org` address with yours.
+3. Put the secrets in `.env` (never commit it):
 
-Generate `GLAM_SECRET` with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. Never commit `.env` or `data/`; both are in `.gitignore`.
+   ```bash
+   cat > .env <<'EOF'
+   CATALOGUE_API_KEY=<read-only service user's API key>
+   MCP_SECRET=<Fernet key>
+   EOF
+   ```
 
-| Setting | Meaning |
-| --- | --- |
-| `GLAM_BACKEND` | `atom-ahg` (default) or `atom-base`. |
-| `PSIS_PUBLIC_BASE` | The catalogue's public address, used in links. |
-| `PSIS_API_BASE` | The catalogue's API address. |
-| `PSIS_API_KEY` | Key of a read-only service user, for the public endpoint. |
-| `GLAM_SOURCE_LABEL` | How answers name the catalogue. |
-| `GLAM_AUTH` | `off` (public, read-only) or `oauth` (signed in). |
-| `GLAM_PUBLIC_BASE` | This server's public address, for OAuth. |
-| `GLAM_HTTP_PATH` | Endpoint path, e.g. `/mcp` or `/public/mcp`. |
-| `GLAM_SECRET` | Fernet key that encrypts stored catalogue keys. |
-| `GLAM_DATA` | Where sign-in tokens are kept (hashed, keys encrypted). |
-| `GLAM_CALL_LOG` | Optional JSON-lines log of tool calls. |
+   Generate `MCP_SECRET` with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
+4. Build and start: `docker build -t ahg/glam-mcp:phase2 . && docker compose up -d`, then check `curl 127.0.0.1:8031/healthz`.
+5. Put the two endpoints behind HTTPS on your own name. `docs/nginx-mcp.theahg.co.za.conf` is a working example to copy and rename.
+6. Run `tests/no_leak.py` against your catalogue before opening it to anyone.
 
-`docs/nginx-mcp.theahg.co.za.conf` is a working nginx site for the two endpoints, and `docs/AHG_Archives_MCP_Quick_Start.md` is the guide for archivists: connecting, checking it works, asking good questions and reviewing proposals.
+A required setting that is missing stops the server at start with its name, rather than falling back to someone else's catalogue.
+
+| Setting | Required | Meaning |
+| --- | --- | --- |
+| `CATALOGUE_URL` | Yes | The catalogue's public address, used in links. |
+| `CATALOGUE_NAME` | Yes | How answers name the catalogue. |
+| `CATALOGUE_API_URL` | No | The catalogue's API. Defaults to `CATALOGUE_URL` + `/api/v2` (`/api` for `atom-base`). |
+| `CATALOGUE_API_KEY` | Public endpoint | Key of a read-only service user. |
+| `GLAM_BACKEND` | No | `atom-ahg` (default) or `atom-base`. |
+| `GLAM_AUTH` | No | `off` (public, read-only, the default) or `oauth` (signed in). |
+| `MCP_PUBLIC_URL` | With `oauth` | This server's own public address, used for sign-in. |
+| `MCP_SECRET` | With `oauth` | Fernet key that encrypts stored catalogue keys. |
+| `MCP_SIGNED_IN_URL` | No | Where the public endpoint tells people to sign in to propose changes. |
+| `GLAM_HTTP_PATH` | No | Endpoint path, e.g. `/mcp` or `/public/mcp`. |
+| `GLAM_DATA` | No | Where sign-in tokens are kept (hashed, keys encrypted). |
+| `GLAM_CALL_LOG` | No | Optional JSON-lines log of tool calls. |
+
+The older names (`PSIS_PUBLIC_BASE`, `PSIS_API_BASE`, `PSIS_API_KEY`, `GLAM_SOURCE_LABEL`, `GLAM_PUBLIC_BASE`, `GLAM_SECRET`) are still accepted.
+
+`docs/AHG_Archives_MCP_Quick_Start.md` is the guide for archivists using AHG's hosted service: connecting, checking it works, asking good questions and reviewing proposals.
+
+## Licence
+
+Copyright (C) 2026 Johan Pieterse, Plain Sailing Information Systems. Released under the GNU Affero General Public License, version 3 or later (AGPL-3.0-or-later); see `LICENSE`. Anyone who runs a changed version as a network service must offer its users the changed source.
 
 ## Contact
 

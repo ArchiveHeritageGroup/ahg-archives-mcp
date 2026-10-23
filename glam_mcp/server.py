@@ -1,4 +1,25 @@
-"""GLAM MCP: AtoM for AI assistants, read and propose.
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Copyright (C) 2026 Johan Pieterse
+# Plain Sailing Information Systems
+# Email: johan@plainsailingisystems.co.za
+#
+# This file is part of the AHG Archives MCP server.
+#
+# The AHG Archives MCP server is free software: you can redistribute it and/or
+# modify it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the License,
+# or (at your option) any later version.
+#
+# It is distributed in the hope that it will be useful, but WITHOUT ANY
+# WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
+# A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+# details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with it. If not, see <https://www.gnu.org/licenses/>.
+
+"""AHG Archives MCP server: AtoM catalogues for AI assistants, read and propose.
 
 One service, no database of its own, two kinds of catalogue (GLAM_BACKEND):
 
@@ -34,11 +55,21 @@ from pydantic import BaseModel, Field
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+def _setting(name: str, old: str = "", default: str | None = None) -> str:
+    """A setting by its name, or by the name it had before (PSIS_*/GLAM_*). With
+    no default it is required: an install that forgets it must not quietly use
+    another catalogue's address."""
+    value = os.environ.get(name) or (os.environ.get(old) if old else None) or default
+    if value is None:
+        raise SystemExit(f"{name} is required (see README, Install for your own catalogue)")
+    return value
+
+
 BACKEND = os.environ.get("GLAM_BACKEND", "atom-ahg")
-PUBLIC_BASE = os.environ.get("PSIS_PUBLIC_BASE", "https://psis.theahg.co.za").rstrip("/")
-API_BASE = os.environ.get("PSIS_API_BASE", PUBLIC_BASE + ("/api/v2" if BACKEND == "atom-ahg" else "/api")).rstrip("/")
-API_KEY = os.environ.get("PSIS_API_KEY", "")
-SOURCE = os.environ.get("GLAM_SOURCE_LABEL", "PSIS - AHG Extensions for AtoM demonstration catalogue")
+PUBLIC_BASE = _setting("CATALOGUE_URL", "PSIS_PUBLIC_BASE").rstrip("/")
+API_BASE = _setting("CATALOGUE_API_URL", "PSIS_API_BASE", PUBLIC_BASE + ("/api/v2" if BACKEND == "atom-ahg" else "/api")).rstrip("/")
+API_KEY = _setting("CATALOGUE_API_KEY", "PSIS_API_KEY", "")
+SOURCE = _setting("CATALOGUE_NAME", "GLAM_SOURCE_LABEL")
 CALL_LOG = os.environ.get("GLAM_CALL_LOG", "")  # file path; empty means stdout
 MAX_LIMIT = 25
 ENTITY_TYPES = {"person": "PERSON", "organisation": "ORG", "place": "GPE", "date": "DATE"}
@@ -54,16 +85,18 @@ log.addHandler(logging.FileHandler(CALL_LOG) if CALL_LOG else logging.StreamHand
 # clients may send their catalogue key as a bearer). GLAM_AUTH=off: the public,
 # read-only service, which never uses a caller key.
 AUTH_MODE = os.environ.get("GLAM_AUTH", "off")
-MCP_BASE = os.environ.get("GLAM_PUBLIC_BASE", "https://mcp.theahg.co.za").rstrip("/")
+MCP_BASE = _setting("MCP_PUBLIC_URL", "GLAM_PUBLIC_BASE", "" if AUTH_MODE == "off" else None).rstrip("/")
 HTTP_PATH = os.environ.get("GLAM_HTTP_PATH", "/mcp")
+# Where to send people who try to propose on the public, read-only service.
+SIGNED_IN_URL = _setting("MCP_SIGNED_IN_URL", default=(MCP_BASE + HTTP_PATH) if AUTH_MODE == "oauth" else "")
 _auth_kwargs: dict = {}
 _provider = None
 if AUTH_MODE == "oauth":
     from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
     from glam_mcp.auth import CatalogueKeyChecker, CatalogueKeyOAuthProvider, Store
-    _secret = os.environ.get("GLAM_SECRET", "")
+    _secret = _setting("MCP_SECRET", "GLAM_SECRET", "")
     if not _secret:
-        raise SystemExit("GLAM_AUTH=oauth needs GLAM_SECRET (a Fernet key)")
+        raise SystemExit("GLAM_AUTH=oauth needs MCP_SECRET (a Fernet key)")
     _store = Store(os.path.join(os.environ.get("GLAM_DATA", "/data"), "oauth.db"), _secret)
     _checker = CatalogueKeyChecker(API_BASE, "X-API-Key" if BACKEND == "atom-ahg" else "REST-API-Key",
                                    "AHG-GLAM-MCP/0.3 (+https://www.atom-extensions.com)",
@@ -163,7 +196,7 @@ def _logged(tool: str, args: dict, ctx: Context | None, fn):
         return {"found": False, "message": "No visible record with that reference.", "source": SOURCE}
     except NeedsCallerKey:
         outcome = "needs_key"
-        return {"found": False, "message": "Proposing changes needs you to be signed in. Connect to https://mcp.theahg.co.za/mcp and sign in with your catalogue API key; the public read-only address cannot propose.", "source": SOURCE}
+        return {"found": False, "message": "Proposing changes needs you to be signed in. Connect to " + (SIGNED_IN_URL or "this catalogue's signed-in MCP address") + " and sign in with your catalogue API key; the public read-only address cannot propose.", "source": SOURCE}
     except Refused as e:
         outcome = "refused"
         return {"found": False, "message": e.message, "source": SOURCE}
