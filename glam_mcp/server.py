@@ -391,6 +391,9 @@ class Proposal(BaseModel):
     value: str = Field(description='As it should appear: a name, a place, or a date such as "1954" or "1938-1945".')
     evidence: str = Field("", description="Where in the record, or which source, supports it.")
     sources: list[str] = Field(default_factory=list, description="URLs of web sources used, if any.")
+    dates_of_existence: str = Field("", description='Person or organisation only: life or existence dates for a new authority record, e.g. "1874-1949".')
+    history: str = Field("", description="Person or organisation only: a short biographical or administrative history, from the record or a named source.")
+    places: str = Field("", description="Person or organisation only: places associated with them, separated by semicolons.")
 
 
 def _needs_key(ctx: Context | None) -> str:
@@ -406,7 +409,10 @@ def propose_access_points_and_dates(slug: str, proposals: list[Proposal], ctx: C
 
     Read the record with get_record first. Propose only what its text, or a
     reliable source you name, supports; give the evidence and source URLs for
-    each. Nothing on the record changes: an archivist reviews every proposal.
+    each. For a person or organisation, also give dates_of_existence, a short
+    history and places when the record or a source states them: they pre-fill
+    the new authority record if the archivist creates one. Nothing on the record
+    changes: an archivist reviews every proposal.
     On AtoM with the AHG extensions they are queued in AI > NER review; on stock
     AtoM they are returned for the archivist to apply. Needs the archivist's own
     staff key.
@@ -420,7 +426,9 @@ def propose_access_points_and_dates(slug: str, proposals: list[Proposal], ctx: C
             return {"queued": [], "message": "Nothing to propose.", "source": SOURCE}
         if BACKEND == "atom-ahg":
             out = _api("POST", f"/descriptions/{slug}/proposals", key, json={"source": "glam-mcp", "entities": [
-                {"type": ENTITY_TYPES[p.kind], "value": p.value.strip(), "evidence": p.evidence, "sources": p.sources} for p in items]})
+                {"type": ENTITY_TYPES[p.kind], "value": p.value.strip(), "evidence": p.evidence, "sources": p.sources,
+                 **({"authority": a} if (a := {k: v.strip() for k, v in (("dates_of_existence", p.dates_of_existence), ("history", p.history), ("places", p.places)) if v.strip()})
+                    and p.kind in ("person", "organisation") else {})} for p in items]})
             return {
                 "source": SOURCE, "url": _url(slug), "queued": out.get("queued", []),
                 "already_proposed_or_linked": out.get("skipped_existing", 0),
