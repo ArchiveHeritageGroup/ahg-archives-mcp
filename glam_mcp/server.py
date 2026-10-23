@@ -226,6 +226,7 @@ def _read_ahg(slug: str, key: str | None) -> dict:
         "places": d.get("places"), "notes": d.get("notes"),
         "part_of": [{"title": a.get("title"), "url": _url(a["slug"])} for a in d.get("hierarchy", []) if a.get("slug")],
         "children_count": d.get("children_count", 0),
+        "provenance": d.get("provenance"),
         "images": [
             {"thumbnail": _file_url(o.get("thumbnail_url")), "reference": _file_url(o.get("reference_url")),
              "iiif_manifest": f"{PUBLIC_BASE}/iiif/manifest/{slug}"}
@@ -253,7 +254,8 @@ def get_record(slug: str, ctx: Context | None = None) -> dict:
     """Read one archival description in full, by its slug (the last part of its URL).
 
     Includes dates, names, subjects, places, notes and, where the catalogue
-    provides them, its place in the hierarchy, its number of children and images.
+    provides them, its place in the hierarchy, its number of children, images,
+    and its provenance chain (owners, dates, transfers, certainty, gaps).
     """
     key = _caller_key(ctx)
     return _logged("get_record", {"slug": slug}, ctx, lambda: (_read_ahg if BACKEND == "atom-ahg" else _read_base)(slug, key))
