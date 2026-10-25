@@ -123,7 +123,8 @@ mcp = FastMCP(
         "look each name and place up with search_authorities and give the id of the existing record it most likely is, "
         "check list_my_proposals so you do not repeat what an archivist already rejected, "
         "and call propose_access_points_and_dates; for relationships between people stated in the record "
-        "(married to, child of), call propose_relationships after proposing both names; for text fields call "
+        "(married to, child of), call propose_relationships after proposing both names; for a scanned page with no text "
+        "call propose_transcription, and for text in another language propose_translation; for text fields call "
         "propose_description_change. Give evidence and source URLs for everything, especially facts "
         "found on the web. Proposals are reviewed by an archivist; never describe them as saved."
     ),
@@ -645,6 +646,76 @@ def propose_description_change(
             "message": "Nothing was saved. Apply this on the record's edit screen.",
         }
     return _logged("propose_description_change", args, ctx, run)
+
+
+@mcp.tool()
+def propose_transcription(slug: str, text: str, digital_object_id: int | None = None, evidence: str = "",
+                          ctx: Context | None = None) -> dict:
+    """Propose a transcription of a record's file, such as a scanned page with no text.
+
+    Look at the page with get_record_image first and transcribe what is written,
+    line by line, in its own language and spelling; mark what you cannot read as
+    [illegible] rather than guessing. Use get_record_text to see whether the file
+    already has text. digital_object_id picks the file when a record has several.
+    At most 65,000 bytes: propose a long document page by page. An archivist
+    compares it with the page image in AI > Suggest review; once approved it is
+    the file's text and is searchable. Needs the archivist's own staff key.
+    """
+    args = {"slug": slug, "chars": len(text), "digital_object_id": digital_object_id}
+
+    def run():
+        key = _needs_key(ctx)
+        if not text.strip():
+            return {"queued": False, "message": "Nothing to propose.", "source": SOURCE}
+        if BACKEND != "atom-ahg":
+            _read_base(slug, key)
+            return {"source": SOURCE, "url": _url(slug), "applied": False, "text": text,
+                    "message": "This catalogue's API cannot store transcriptions, so nothing was saved."}
+        out = _api("POST", f"/descriptions/{slug}/proposals", key, json={"source": "glam-mcp", "transcripts": [
+            {"text": text, "digital_object_id": digital_object_id, "evidence": evidence}]})
+        queued = bool(out.get("fields_queued"))
+        return {"source": SOURCE, "url": _url(slug), "queued": queued, "review_url": PUBLIC_BASE + "/ai/suggest/review",
+                "message": ("Queued for review beside the page image. Nothing changes until an archivist approves it."
+                            if queued else "Nothing new to queue: the same transcription is already waiting for review.")}
+    return _logged("propose_transcription", args, ctx, run)
+
+
+@mcp.tool()
+def propose_translation(
+    slug: str,
+    field: Literal["title", "scope_and_content", "archival_history", "extent_and_medium", "arrangement", "access_conditions", "reproduction_conditions"],
+    language: str,
+    text: str,
+    evidence: str = "",
+    ctx: Context | None = None,
+) -> dict:
+    """Propose a translation of one field of a record into another language.
+
+    language is the target language code, e.g. "en", "af" or "nl". Translate the
+    record's current text for that field faithfully (read it with get_record);
+    keep names, dates and reference codes as they are. An archivist reviews it in
+    AI > Suggest review next to any text already held in that language; once
+    approved the record shows it in that language. Needs the archivist's own
+    staff key.
+    """
+    args = {"slug": slug, "field": field, "language": language, "chars": len(text)}
+
+    def run():
+        key = _needs_key(ctx)
+        if not text.strip():
+            return {"queued": False, "message": "Nothing to propose.", "source": SOURCE}
+        if BACKEND != "atom-ahg":
+            _read_base(slug, key)
+            return {"source": SOURCE, "url": _url(slug), "applied": False, "field": field, "language": language, "text": text,
+                    "message": "Nothing was saved. Add this translation on the record's edit screen in that language."}
+        out = _api("POST", f"/descriptions/{slug}/proposals", key, json={"source": "glam-mcp", "fields": [
+            {"field": field, "culture": language.strip().lower(), "text": text, "evidence": evidence}]})
+        queued = bool(out.get("fields_queued"))
+        return {"source": SOURCE, "url": _url(slug), "field": field, "language": language, "queued": queued,
+                "review_url": PUBLIC_BASE + "/ai/suggest/review",
+                "message": ("Queued for review. Nothing changes until an archivist approves it."
+                            if queued else "Nothing new to queue: the same text is already waiting for review.")}
+    return _logged("propose_translation", args, ctx, run)
 
 
 @mcp.custom_route("/healthz", methods=["GET"])
