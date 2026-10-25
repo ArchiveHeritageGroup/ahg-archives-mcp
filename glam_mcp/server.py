@@ -21,7 +21,8 @@
 
 """AHG Archives MCP server: AtoM catalogues for AI assistants, read and propose.
 
-One service, no database of its own, two kinds of catalogue (GLAM_BACKEND):
+One service, no database of its own, two kinds of catalogue (GLAM_BACKEND; the
+default, auto, asks the catalogue which API it has):
 
   atom-ahg   AtoM with the AHG extensions (PSIS). Reads through REST API v2;
              proposals go into the existing review queue (AI > Review), where an
@@ -68,10 +69,30 @@ def _setting(name: str, old: str = "", default: str | None = None) -> str:
     return value
 
 
-BACKEND = os.environ.get("GLAM_BACKEND", "atom-ahg")
+def _detect_backend(public_base: str, key: str) -> str:
+    """auto: ask the catalogue which API it has. AHG REST API v2 (ahgAPIPlugin)
+    answers JSON at /api/v2, even when it refuses the key; stock AtoM's
+    arRestApiPlugin answers at /api. A catalogue that answers neither cannot be
+    served, so the service stops and is restarted to ask again."""
+    ua = {"User-Agent": "AHG-GLAM-MCP/0.3 (+https://www.atom-extensions.com)", "Accept": "application/json"}
+    for backend, path, header in (("atom-ahg", "/api/v2/descriptions?limit=1", "X-API-Key"),
+                                  ("atom-base", "/api/informationobjects?limit=1", "REST-API-Key")):
+        try:
+            r = httpx.get(public_base + path, headers={**ua, header: key}, timeout=15.0)
+            if r.status_code in (200, 401, 403) and "json" in r.headers.get("content-type", ""):
+                return backend
+        except httpx.HTTPError:
+            pass
+    raise SystemExit(f"GLAM_BACKEND=auto: {public_base} answers neither /api/v2 (AHG) nor /api (stock AtoM REST API); "
+                     "check CATALOGUE_URL and that the API plugin is enabled, or set GLAM_BACKEND")
+
+
 PUBLIC_BASE = _setting("CATALOGUE_URL", "PSIS_PUBLIC_BASE").rstrip("/")
-API_BASE = _setting("CATALOGUE_API_URL", "PSIS_API_BASE", PUBLIC_BASE + ("/api/v2" if BACKEND == "atom-ahg" else "/api")).rstrip("/")
 API_KEY = _setting("CATALOGUE_API_KEY", "PSIS_API_KEY", "")
+BACKEND = os.environ.get("GLAM_BACKEND", "auto")
+if BACKEND == "auto":
+    BACKEND = _detect_backend(PUBLIC_BASE, API_KEY)
+API_BASE = _setting("CATALOGUE_API_URL", "PSIS_API_BASE", PUBLIC_BASE + ("/api/v2" if BACKEND == "atom-ahg" else "/api")).rstrip("/")
 SOURCE = _setting("CATALOGUE_NAME", "GLAM_SOURCE_LABEL")
 CALL_LOG = os.environ.get("GLAM_CALL_LOG", "")  # file path; empty means stdout
 MAX_LIMIT = 25
@@ -83,7 +104,7 @@ PROPOSAL_CAP = int(os.environ.get("GLAM_PROPOSAL_CAP", "200"))
 ENTITY_TYPES = {"person": "PERSON", "organisation": "ORG", "place": "GPE", "date": "DATE"}
 
 if BACKEND not in ("atom-ahg", "atom-base"):
-    raise SystemExit(f"GLAM_BACKEND must be atom-ahg or atom-base, not {BACKEND!r}")
+    raise SystemExit(f"GLAM_BACKEND must be auto, atom-ahg or atom-base, not {BACKEND!r}")
 
 log = logging.getLogger("glam-mcp.calls")
 log.setLevel(logging.INFO)
@@ -185,7 +206,8 @@ def _api(method: str, path: str, key: str | None = None, **kw) -> Any:
     r = _client.request(method, API_BASE + path, headers={KEY_HEADER: key or API_KEY}, **kw)
     if r.status_code == 404:
         raise NotVisible()
-    if r.status_code in (401, 403):
+    # 501: the catalogue lacks what this needs (e.g. AHG API without the AI plugin's review queues).
+    if r.status_code in (401, 403, 501):
         try:
             message = r.json().get("message") or "Not authorised"
         except Exception:

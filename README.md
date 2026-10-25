@@ -28,7 +28,9 @@ What a caller sees follows AtoM's own permissions: unpublished records, hidden c
 
 ## Backends
 
-- **`atom-ahg`** (default): AtoM with the AHG Extensions, through REST API v2 (`ahgAPIPlugin`). Needs atom-ahg-plugins v3.121.63 or later for `propose_transcription` and `propose_translation`, v3.121.62 for `propose_relationships`, v3.121.61 for `list_my_proposals`, v3.121.60 for `search_authorities` and `existing_id`, v3.121.45 for authority details on proposals (v3.121.43 for the rest). Proposals are queued in AI > NER review and AI > Suggest review for an archivist; with the Authority Resolution plugin they also reach its queue.
+The server finds out which of these a catalogue has when it starts (`GLAM_BACKEND=auto`), so the same install serves both.
+
+- **`atom-ahg`**: AtoM with the AHG Extensions, through REST API v2 (`ahgAPIPlugin`). Needs atom-ahg-plugins v3.121.63 or later for `propose_transcription` and `propose_translation`, v3.121.62 for `propose_relationships`, v3.121.61 for `list_my_proposals`, v3.121.60 for `search_authorities` and `existing_id`, v3.121.45 for authority details on proposals (v3.121.43 for the rest). Proposals are queued in AI > NER review and AI > Suggest review for an archivist; with the Authority Resolution plugin they also reach its queue.
 - **Heratio** (planned, heratio#1558): Heratio's REST API v2 has the same shape. Once it gains the proposals and record-text endpoints and returns provenance in the full record, the `atom-ahg` backend serves Heratio too.
 - **`atom-base`**: stock AtoM, through its own REST API. Read tools work; proposals are returned to the assistant for the archivist to apply by hand, because the stock API cannot add access points without overwriting them.
 
@@ -60,7 +62,7 @@ A required setting that is missing stops the server at start with its name, rath
 | `CATALOGUE_NAME` | Yes | How answers name the catalogue. |
 | `CATALOGUE_API_URL` | No | The catalogue's API. Defaults to `CATALOGUE_URL` + `/api/v2` (`/api` for `atom-base`). |
 | `CATALOGUE_API_KEY` | Public endpoint | Key of a read-only service user. |
-| `GLAM_BACKEND` | No | `atom-ahg` (default) or `atom-base`. |
+| `GLAM_BACKEND` | No | `auto` (default: asks the catalogue at start-up and uses the AHG API where it is installed, AtoM's own REST API where not), `atom-ahg` or `atom-base`. |
 | `GLAM_AUTH` | No | `off` (public, read-only, the default) or `oauth` (signed in). |
 | `MCP_PUBLIC_URL` | With `oauth` | This server's own public address, used for sign-in. |
 | `MCP_SECRET` | With `oauth` | Fernet key that encrypts stored catalogue keys. |
