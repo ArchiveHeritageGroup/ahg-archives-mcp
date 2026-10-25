@@ -1,0 +1,16 @@
+# Throwaway stock AtoM for the MCP tests (#6, #7, #8). Nothing here is kept:
+# `docker compose down -v` removes it all.
+#   docker compose up -d --build && docker compose exec atom sh /opt/setup.sh
+services:
+  db:
+    image: mysql:8.0
+    ports: ["127.0.0.1:${STOCK_DB_PORT:-3317}:3306"]  # for tests/no_leak.py's read-only queries
+    environment: {MYSQL_ROOT_PASSWORD: atomtest, MYSQL_DATABASE: atom}
+    command: --sql-mode=ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION --optimizer-switch=block_nested_loop=off --character-set-server=utf8mb4 --collation-server=utf8mb4_0900_ai_ci
+  search:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.10.2
+    environment: {discovery.type: single-node, xpack.security.enabled: "false", ES_JAVA_OPTS: "-Xms512m -Xmx512m"}
+  atom:
+    build: .
+    depends_on: [db, search]
+    ports: ["127.0.0.1:${STOCK_ATOM_PORT:-8097}:80"]
