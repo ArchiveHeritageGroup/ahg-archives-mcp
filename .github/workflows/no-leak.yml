@@ -1,0 +1,32 @@
+# On every push: start a throwaway stock AtoM with published and draft records,
+# run the MCP's public read-only service against it, and fail if any hidden
+# record comes back through a tool (tests/no_leak.py). No secrets needed.
+name: no-leak
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  stock-atom:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start stock AtoM
+        working-directory: tests/stock-atom
+        run: |
+          docker compose -p stock-atom up -d --build
+          docker compose -p stock-atom exec -T atom sh /opt/setup.sh > setup.log 2>&1 || { tail -40 setup.log; exit 1; }
+          echo "READER_KEY=$(grep '^READER_API_KEY=' setup.log | cut -d= -f2)" >> "$GITHUB_ENV"
+      - name: Start the MCP (public, read-only)
+        run: |
+          docker build -t glam-mcp .
+          docker run -d --name mcp --network host -e GLAM_PORT=8099 -e CATALOGUE_URL=http://127.0.0.1:8097 \
+            -e CATALOGUE_NAME="Stock AtoM test" -e CATALOGUE_API_KEY="$READER_KEY" glam-mcp
+          for i in $(seq 30); do curl -sf http://127.0.0.1:8099/healthz && break; sleep 2; done
+      - name: No-leak test
+        run: |
+          printf '[client]\nhost=127.0.0.1\nport=3317\nuser=root\npassword=atomtest\n' > "$RUNNER_TEMP/db.cnf"
+          pip install -q "mcp<2"
+          GLAM_MCP_URL=http://127.0.0.1:8099/mcp CATALOGUE_DB_CNF="$RUNNER_TEMP/db.cnf" CATALOGUE_DB=atom \
+            PUBLIC_CONTROL_SLUG=published-letter python tests/no_leak.py
+      - name: Logs on failure
+        if: failure()
+        run: docker logs mcp 2>&1 | tail -50

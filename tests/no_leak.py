@@ -19,10 +19,11 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with it. If not, see <https://www.gnu.org/licenses/>.
 
-"""No-leak test: hidden PSIS records must never come back through the GLAM MCP.
+"""No-leak test: hidden records must never come back through the GLAM MCP.
 
-Hidden = draft, under an active embargo, security-classified, or under an ICIP
-restriction. For each one (up to a cap) the test asks the running service, the
+Hidden = draft and, on catalogues with the AHG extensions, under an active
+embargo, security-classified, or under an ICIP restriction. Works on PSIS and on
+stock AtoM (tests/stock-atom, which CI starts on every push). For each one (up to a cap) the test asks the running service, the
 way an assistant would:
 
   - get_record, get_iiif_manifest and get_record_text must answer "not found";
@@ -33,7 +34,10 @@ way an assistant would:
 Plus a positive control that a known public record is found, so a dead service
 cannot pass. Reads the hidden list from the database (read only).
 
-    GLAM_MCP_URL=http://127.0.0.1:8031/mcp python tests/no_leak.py
+    GLAM_MCP_URL=http://127.0.0.1:8031/mcp CATALOGUE_DB_CNF=~/psis.cnf python tests/no_leak.py
+
+CATALOGUE_DB_CNF (or PSIS_DB_CNF) is a mysql defaults file; CATALOGUE_DB the
+database (default archive).
 """
 
 import asyncio
@@ -46,18 +50,24 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
 URL = os.environ.get("GLAM_MCP_URL", "http://127.0.0.1:8031/mcp")
-DB_CNF = os.environ.get("PSIS_DB_CNF", "")  # mysql --defaults-extra-file
+DB_CNF = os.environ.get("CATALOGUE_DB_CNF") or os.environ.get("PSIS_DB_CNF", "")  # mysql --defaults-extra-file
+DB_NAME = os.environ.get("CATALOGUE_DB", "archive")
 PUBLIC_CONTROL = os.environ.get("PUBLIC_CONTROL_SLUG", "hendrik-and-debora-engelbrecht")
 CAP = int(os.environ.get("NO_LEAK_CAP", "40"))
 
+# Each kind of hidden record, with the table it needs; kinds whose table the
+# catalogue lacks (stock AtoM has drafts only) are left out.
+HIDDEN_KINDS = [
+    ("status", "SELECT object_id id, 'draft' why FROM status WHERE type_id = 158 AND status_id = 159"),
+    ("rights_embargo", """SELECT object_id, 'embargo' FROM rights_embargo
+        WHERE lifted_at IS NULL AND (end_date IS NULL OR end_date > NOW()) AND (start_date IS NULL OR start_date <= NOW())"""),
+    ("object_security_classification", "SELECT object_id, 'classified' FROM object_security_classification WHERE active = 1"),
+    ("icip_access_restriction", """SELECT information_object_id, 'icip' FROM icip_access_restriction
+        WHERE (end_date IS NULL OR end_date > NOW())"""),
+]
 HIDDEN_SQL = """
 SELECT DISTINCT io.id, s.slug, COALESCE(i.title, ''), io.parent_id, h.why FROM (
-  SELECT object_id id, 'draft' why FROM status WHERE type_id = 158 AND status_id = 159
-  UNION SELECT object_id, 'embargo' FROM rights_embargo
-        WHERE lifted_at IS NULL AND (end_date IS NULL OR end_date > NOW()) AND (start_date IS NULL OR start_date <= NOW())
-  UNION SELECT object_id, 'classified' FROM object_security_classification WHERE active = 1
-  UNION SELECT information_object_id, 'icip' FROM icip_access_restriction
-        WHERE (end_date IS NULL OR end_date > NOW())
+  {kinds}
 ) h
 JOIN information_object io ON io.id = h.id
 JOIN slug s ON s.object_id = io.id
@@ -74,7 +84,7 @@ WHERE c.lft > (SELECT lft FROM information_object WHERE id = {id})
 
 
 def sql(q: str) -> list[list[str]]:
-    out = subprocess.run(["mysql", f"--defaults-extra-file={DB_CNF}", "archive", "-N", "-B", "-e", q],
+    out = subprocess.run(["mysql", f"--defaults-extra-file={DB_CNF}", DB_NAME, "-N", "-B", "-e", q],
                          capture_output=True, text=True, check=True).stdout
     return [line.split("\t") for line in out.splitlines() if line]
 
@@ -85,7 +95,12 @@ async def call(s: ClientSession, tool: str, **args) -> dict:
 
 
 async def main() -> int:
-    hidden = sql(HIDDEN_SQL)[:CAP]
+    tables = {t for (t,) in sql("SHOW TABLES")}
+    kinds = "\n  UNION ".join(q for table, q in HIDDEN_KINDS if table in tables)
+    hidden = sql(HIDDEN_SQL.format(kinds=kinds))[:CAP]
+    if not hidden:
+        print("FAIL no hidden records to test - the fixture or the query is wrong")
+        return 1
     slugs_by_id = {h[0]: h for h in hidden}
     failures: list[str] = []
     checks = 0
@@ -133,5 +148,5 @@ async def main() -> int:
 
 if __name__ == "__main__":
     if not DB_CNF:
-        sys.exit("Set PSIS_DB_CNF to a mysql defaults file (read-only use)")
+        sys.exit("Set CATALOGUE_DB_CNF to a mysql defaults file (read-only use)")
     sys.exit(asyncio.run(main()))

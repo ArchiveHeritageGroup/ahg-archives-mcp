@@ -1,0 +1,6 @@
+legacyId,parentId,identifier,title,levelOfDescription,scopeAndContent,publicationStatus,nameAccessPoints,placeAccessPoints,eventDates,eventTypes,eventActors,culture
+1,,TEST-F1,Stock Test Fonds,Fonds,"Papers of the Pretorius family, 1880-1950, kept for testing.",Published,Pretorius family,Pretoria,1880-1950,Creation,Pretorius family,en
+2,1,TEST-F1-1,Published letter,Item,"Letter from Jan Pretorius to his sister Anna, Pretoria, 3 May 1902.",Published,Jan Pretorius|Anna Pretorius,Pretoria,1902-05-03,Creation,Jan Pretorius,en
+3,1,TEST-F1-2,Draft diary hidden from the public,Item,"Unpublished diary; must never be returned to a visitor.",Draft,,,1905,Creation,Jan Pretorius,en
+4,,TEST-F2,Draft fonds hidden from the public,Fonds,"Draft fonds; neither it nor its child may be returned to a visitor.",Draft,,,,,,en
+5,4,TEST-F2-1,Child of the draft fonds,Item,"Child of a draft fonds.",Draft,,,,,,en

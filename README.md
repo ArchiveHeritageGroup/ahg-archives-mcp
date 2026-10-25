@@ -32,7 +32,15 @@ The server finds out which of these a catalogue has when it starts (`GLAM_BACKEN
 
 - **`atom-ahg`**: AtoM with the AHG Extensions, through REST API v2 (`ahgAPIPlugin`). Needs atom-ahg-plugins v3.121.63 or later for `propose_transcription` and `propose_translation`, v3.121.62 for `propose_relationships`, v3.121.61 for `list_my_proposals`, v3.121.60 for `search_authorities` and `existing_id`, v3.121.45 for authority details on proposals (v3.121.43 for the rest). Proposals are queued in AI > NER review and AI > Suggest review for an archivist; with the Authority Resolution plugin they also reach its queue.
 - **Heratio** (planned, heratio#1558): Heratio's REST API v2 has the same shape. Once it gains the proposals and record-text endpoints and returns provenance in the full record, the `atom-ahg` backend serves Heratio too.
-- **`atom-base`**: stock AtoM, through its own REST API. Read tools work; proposals are returned to the assistant for the archivist to apply by hand, because the stock API cannot add access points without overwriting them.
+- **`atom-base`**: stock AtoM, through its own REST API (`arRestApiPlugin`), tested on AtoM 2.10.2. Search, records, children and `work_through_series` work; authority records, IIIF manifests and file text are not offered by the stock API and say so. Proposals are not saved: the stock write API overwrites rather than adds. Instead, names and places come back as a one-row CSV for AtoM's own **Import > CSV** (type *Archival description*, update behaviour *Update matches ignoring blank fields in CSV*, tick *Skip unmatched records*), which adds them to the record and leaves the rest as it is. Dates are listed for entry by hand, because an import replaces the record's dates. AtoM matches the file on the record's identifier, title and repository, so a record without a repository cannot be updated this way.
+
+### Stock AtoM: setting up
+
+1. Admin > Plugins: enable **arRestApiPlugin**.
+2. Create a user with **no groups** for the public service and generate its REST API key (edit the user). Signed-in archivists use their own keys.
+3. Set `CATALOGUE_URL`, `CATALOGUE_API_KEY` and `CATALOGUE_NAME`; `GLAM_BACKEND=auto` finds the stock API.
+
+AtoM 2.10.2's REST API checks only the "read" permission, not "view draft", so any key can read draft records through it. The server therefore treats a record on stock AtoM as visible only when a visitor can open its public page, which applies the catalogue's own rules; anything else is "not found". Keep the API key away from anything but this server.
 
 ## Install for your own catalogue
 
@@ -75,6 +83,17 @@ A required setting that is missing stops the server at start with its name, rath
 The older names (`PSIS_PUBLIC_BASE`, `PSIS_API_BASE`, `PSIS_API_KEY`, `GLAM_SOURCE_LABEL`, `GLAM_PUBLIC_BASE`, `GLAM_SECRET`) are still accepted.
 
 `docs/AHG_Archives_MCP_Quick_Start.md` is the guide for archivists using AHG's hosted service: connecting, checking it works, asking good questions and reviewing proposals.
+
+## Tests
+
+`tests/no_leak.py` checks that hidden records (drafts and, with the AHG extensions, embargoed, classified and ICIP-restricted records) never come back through any tool: not by reference, not in search, not among children, not named in a visible record's hierarchy. On every push, GitHub Actions starts a throwaway stock AtoM 2.10.2 with published and draft records (`tests/stock-atom`), runs the public service against it and runs the test (`.github/workflows/no-leak.yml`). To run it by hand:
+
+    cd tests/stock-atom && docker compose -p stock-atom up -d --build
+    docker compose -p stock-atom exec -T atom sh /opt/setup.sh    # prints READER_API_KEY and ADMIN_API_KEY
+    # start the server with CATALOGUE_URL=http://127.0.0.1:8097 and the reader key, then:
+    GLAM_MCP_URL=http://127.0.0.1:8000/mcp CATALOGUE_DB_CNF=db.cnf CATALOGUE_DB=atom PUBLIC_CONTROL_SLUG=published-letter python tests/no_leak.py
+
+`docker compose -p stock-atom down -v` removes the test catalogue.
 
 ## Licence
 

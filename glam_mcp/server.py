@@ -43,7 +43,9 @@ Every result carries the record's public URL and source, so an assistant can
 cite it. Every tool call is logged as one JSON line.
 """
 
+import csv
 import hashlib
+import io
 import json
 import logging
 import os
@@ -279,7 +281,10 @@ def search_records(query: str, limit: int = 10, skip: int = 0, ctx: Context | No
             hits = [_hit(h["slug"], h.get("title"), h.get("level_of_description")) for h in data.get("results", []) if h.get("slug")]
         else:
             data = _api("GET", "/informationobjects", key, params={"sq0": query, "limit": n, "skip": s})
-            hits = [_hit(h["slug"], h.get("title"), h.get("level_of_description")) for h in data.get("results", []) if h.get("slug")]
+            hits = [_hit(h["slug"], h.get("title"), h.get("level_of_description")) for h in data.get("results", [])
+                    if h.get("slug") and _visitor_sees(h["slug"])]
+            # The total counts records a visitor cannot see; report what is shown.
+            data = {"total": s + len(hits) if len(hits) < n else data.get("total")}
         return {"source": SOURCE, "total": data.get("total", len(hits)), "results": hits}
     return _logged("search_records", {"query": query, "limit": limit, "skip": skip}, ctx, run)
 
@@ -303,17 +308,50 @@ def _read_ahg(slug: str, key: str | None) -> dict:
     }
 
 
+_visible_cache: dict[str, tuple[float, bool]] = {}
+
+
+def _visitor_sees(slug: str) -> bool:
+    """Stock AtoM only: may a visitor open this record's page? Its REST API checks
+    only "read", never "view draft", so any key reads drafts (AtoM 2.10.2). The
+    public page applies the catalogue's own rules (drafts, other denials) in any
+    language, so a record counts as visible only when a visitor gets it.
+    Anything but 200 is hidden. Remembered for five minutes."""
+    now = time.time()
+    hit = _visible_cache.get(slug)
+    if hit and hit[0] > now - 300:
+        return hit[1]
+    try:
+        ok = _client.get(f"{PUBLIC_BASE}/{slug}", headers={"Accept": "text/html"}, follow_redirects=False).status_code == 200
+    except httpx.HTTPError:
+        ok = False
+    if len(_visible_cache) > 5000:
+        _visible_cache.clear()
+    _visible_cache[slug] = (now, ok)
+    return ok
+
+
+def _names_base(d: dict) -> list:
+    """Creators and name access points, as names."""
+    out = []
+    for n in (d.get("creators") or []) + (d.get("name_access_points") or []):
+        n = n.get("authorized_form_of_name") if isinstance(n, dict) else n
+        if n and n not in out:
+            out.append(n)
+    return out
+
+
 def _read_base(slug: str, key: str | None) -> dict:
-    # ponytail: field names follow arRestApiPlugin's read action; untested until
-    # a stock AtoM test site is available.
+    if not _visitor_sees(slug):
+        raise NotVisible()
     d = _api("GET", f"/informationobjects/{slug}", key)
     return {
         "found": True, "source": SOURCE, "url": _url(slug), "slug": slug,
         "title": d.get("title"), "reference_code": d.get("reference_code"), "level": d.get("level_of_description"),
         "dates": d.get("dates"), "extent": d.get("extent_and_medium"), "scope_and_content": d.get("scope_and_content"),
-        "archival_history": d.get("archival_history"), "names": d.get("creators") or d.get("names"),
+        "archival_history": d.get("archival_history"), "names": _names_base(d),
         "subjects": d.get("subject_access_points"), "places": d.get("place_access_points"), "notes": d.get("notes"),
-        "part_of": [], "children_count": None, "images": [],
+        "repository": d.get("repository"), "part_of": [], "children_count": None, "images": [],
     }
 
 
@@ -341,7 +379,10 @@ def get_children(slug: str, limit: int = 25, skip: int = 0, ctx: Context | None 
             kids = [_hit(c["slug"], c.get("title"), c.get("level_of_description")) for c in data.get("results", []) if c.get("slug")]
             return {"source": SOURCE, "parent": {"title": parent.get("title"), "url": _url(slug)}, "total": data.get("total", 0), "results": kids}
         tree = _api("GET", f"/informationobjects/tree/{slug}", key)
-        kids = [_hit(c["slug"], c.get("title"), c.get("level")) for c in (tree.get("children") or []) if c.get("slug")]
+        if not _visitor_sees(slug):
+            raise NotVisible()
+        kids = [_hit(c["slug"], c.get("title"), c.get("level")) for c in (tree.get("children") or [])
+                if c.get("slug") and _visitor_sees(c["slug"])]
         start = max(0, int(skip))
         return {"source": SOURCE, "parent": {"title": tree.get("title"), "url": _url(slug)}, "total": len(kids), "results": kids[start:start + _limit(limit)]}
     return _logged("get_children", {"slug": slug, "limit": limit, "skip": skip}, ctx, run)
@@ -363,9 +404,16 @@ def work_through_series(slug: str, limit: int = 10, skip: int = 0, ctx: Context 
     key = _caller_key(ctx)
 
     def run():
-        if BACKEND != "atom-ahg":
-            return {"found": False, "message": "This catalogue's API cannot list children with proposals; use get_children.", "source": SOURCE}
         n, s = _limit(limit), max(0, int(skip))
+        if BACKEND != "atom-ahg":
+            # Stock AtoM keeps no proposals: the batch is the children alone.
+            kids = get_children(slug, n, s, ctx)
+            if "results" not in kids:
+                return kids
+            total = kids["total"]
+            return {"source": SOURCE, "parent": kids["parent"], "total_children": total,
+                    "batch": [{**k, "my_proposals": {}} for k in kids["results"]], "batch_proposals_by_status": {},
+                    "proposals_left_this_hour": _budget(key) if key else 0, "next_skip": s + n if s + n < total else None}
         parent = _api("GET", f"/descriptions/{slug}", key)
         data = _api("GET", "/descriptions", key, params={"parent": parent["id"], "limit": n, "skip": s})
         kids = [c for c in data.get("results", []) if c.get("slug")]
@@ -593,6 +641,47 @@ def list_my_proposals(status: Literal["pending", "approved", "edited", "linked",
     return _logged("list_my_proposals", args, ctx, run)
 
 
+# Stock AtoM's CSV import, in "update matches ignoring blank fields" mode, adds
+# names, places and subjects to the matched record and leaves everything else
+# alone (checked on AtoM 2.10.2). It replaces dates, and with them the creator
+# links, so dates are never put in the file.
+CSV_COLUMNS = {"person": "nameAccessPoints", "organisation": "nameAccessPoints", "place": "placeAccessPoints"}
+
+
+def _import_csv(slug: str, rec: dict, items: list, key: str | None) -> dict:
+    """Stock AtoM: the proposals as a one-row CSV for Import > CSV, matched on the
+    record's identifier, title and repository (how AtoM finds it)."""
+    identifier = (_api("GET", f"/informationobjects/tree/{slug}", key).get("identifier") or "").strip()
+    dates = [p.value for p in items if p.kind == "date"]
+    values: dict[str, list[str]] = defaultdict(list)
+    for p in items:
+        if p.kind in CSV_COLUMNS:
+            v = p.value.strip().replace("|", "/")  # | separates values in AtoM CSV
+            if v not in values[CSV_COLUMNS[p.kind]]:
+                values[CSV_COLUMNS[p.kind]].append(v)
+    note = (" Enter the dates by hand on the edit screen: " + "; ".join(dates) + ". An import would replace the record's dates.") if dates else ""
+    if not values:
+        return {"message": "Nothing was saved: this catalogue's API cannot add dates without overwriting them." + note}
+    if not identifier or not rec.get("title") or not rec.get("repository"):
+        return {"message": "Nothing was saved, and no import file could be made: AtoM matches an import on the record's "
+                           "identifier, title and repository, and this record lacks " + ("an identifier" if not identifier else "a repository")
+                           + ". Add the names and places on its edit screen." + note}
+    out = io.StringIO()
+    # Without publicationStatus an update import resets the record to the site's
+    # default status (draft): checked on AtoM 2.10.2. Only records a visitor can
+    # see get a file, so Published is their current status.
+    cols = ["identifier", "title", "repository", "publicationStatus", *sorted(values)]
+    w = csv.writer(out)
+    w.writerow(cols)
+    w.writerow([identifier, rec["title"], rec["repository"], "Published", *("|".join(values[c]) for c in sorted(values))])
+    return {
+        "import_csv": out.getvalue(),
+        "message": "Nothing was saved yet. To apply the names and places without retyping, save import_csv as a .csv file and load it "
+                   "in AtoM at Import > CSV: type Archival description, update behaviour \"Update matches ignoring blank fields in CSV\", "
+                   "and tick \"Skip unmatched records\". AtoM adds them to the record and leaves the rest as it is." + note,
+    }
+
+
 @mcp.tool()
 def propose_access_points_and_dates(slug: str, proposals: list[Proposal], ctx: Context | None = None) -> dict:
     """Propose access points (people, organisations, places) and dates for one record.
@@ -632,11 +721,10 @@ def propose_access_points_and_dates(slug: str, proposals: list[Proposal], ctx: C
                 "message": ("Queued for review. Nothing on the record changes until an archivist approves it."
                             if out.get("queued") else "Nothing new to queue: these were already proposed or linked for this record."),
             }
-        _read_base(slug, key)  # the record exists and this key may read it
+        rec = _read_base(slug, key)  # the record exists and a visitor may see it
         return {
             "source": SOURCE, "url": _url(slug), "applied": False, "proposals": [p.model_dump() for p in items],
-            "message": "This catalogue's API cannot add access points or dates without overwriting existing ones, "
-                       "so nothing was saved. Apply these on the record's edit screen.",
+            **_import_csv(slug, rec, items, key),
         }
     return _logged("propose_access_points_and_dates", args, ctx, run)
 
