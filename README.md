@@ -11,6 +11,7 @@ In development. See it in action on AtoM: [AtoM MCP Server in Action](https://yo
 | `search_records` | Search descriptions by text, optionally under one parent. |
 | `get_record` | One description in full: dates, creators, access points, hierarchy, children, images and the provenance chain. |
 | `get_children` | The records directly below a description. |
+| `work_through_series` | Walk every record below a parent (each page of a family Bible), a batch at a time, with your proposals on each so far and how many you may still make this hour. |
 | `get_authority` | An authority record (person, family or organisation). |
 | `search_authorities` | Find existing people, organisations, families or places by name, with their ids. |
 | `get_iiif_manifest` | The IIIF manifest for a record's images. |
@@ -67,6 +68,7 @@ A required setting that is missing stops the server at start with its name, rath
 | `GLAM_HTTP_PATH` | No | Endpoint path, e.g. `/mcp` or `/public/mcp`. |
 | `GLAM_DATA` | No | Where sign-in tokens are kept (hashed, keys encrypted). |
 | `GLAM_CALL_LOG` | No | Optional JSON-lines log of tool calls. |
+| `GLAM_PROPOSAL_CAP` | No | Proposal items one signed-in person may queue per hour (default 200). |
 
 The older names (`PSIS_PUBLIC_BASE`, `PSIS_API_BASE`, `PSIS_API_KEY`, `GLAM_SOURCE_LABEL`, `GLAM_PUBLIC_BASE`, `GLAM_SECRET`) are still accepted.
 

@@ -42,10 +42,13 @@ Every result carries the record's public URL and source, so an assistant can
 cite it. Every tool call is logged as one JSON line.
 """
 
+import hashlib
 import json
 import logging
 import os
+import threading
 import time
+from collections import defaultdict, deque
 from typing import Any, Literal
 
 import httpx
@@ -72,6 +75,11 @@ API_KEY = _setting("CATALOGUE_API_KEY", "PSIS_API_KEY", "")
 SOURCE = _setting("CATALOGUE_NAME", "GLAM_SOURCE_LABEL")
 CALL_LOG = os.environ.get("GLAM_CALL_LOG", "")  # file path; empty means stdout
 MAX_LIMIT = 25
+# Proposal items one signed-in key may queue per hour (names, places, dates,
+# relationships, texts), so one session cannot flood the review queues.
+# ponytail: counted in this process only; a restart resets it. Move it to the
+# catalogue (plugins #223, key daily caps) when keys are issued more widely.
+PROPOSAL_CAP = int(os.environ.get("GLAM_PROPOSAL_CAP", "200"))
 ENTITY_TYPES = {"person": "PERSON", "organisation": "ORG", "place": "GPE", "date": "DATE"}
 
 if BACKEND not in ("atom-ahg", "atom-base"):
@@ -318,6 +326,50 @@ def get_children(slug: str, limit: int = 25, skip: int = 0, ctx: Context | None 
 
 
 @mcp.tool()
+def work_through_series(slug: str, limit: int = 10, skip: int = 0, ctx: Context | None = None) -> dict:
+    """Work through every record below a parent (for example each page of a family
+    Bible), a batch at a time, with a running summary of what you proposed where.
+
+    Returns a batch of the parent's children, each with your proposals on it so
+    far by status, the totals for the whole batch, how many proposals you may
+    still make this hour, and next_skip for the next batch (null when done).
+    For each child: read it (get_record, and get_record_text or get_record_image
+    when its text is thin), skip it when your proposals there are still pending,
+    propose, then move on. Call again with skip=next_skip until it is null. A
+    child with children of its own is a series: work through it the same way.
+    """
+    key = _caller_key(ctx)
+
+    def run():
+        if BACKEND != "atom-ahg":
+            return {"found": False, "message": "This catalogue's API cannot list children with proposals; use get_children.", "source": SOURCE}
+        n, s = _limit(limit), max(0, int(skip))
+        parent = _api("GET", f"/descriptions/{slug}", key)
+        data = _api("GET", "/descriptions", key, params={"parent": parent["id"], "limit": n, "skip": s})
+        kids = [c for c in data.get("results", []) if c.get("slug")]
+        mine: dict[str, dict] = defaultdict(lambda: defaultdict(int))
+        if key:
+            for p in _api("GET", "/proposals", key, params={"mine": 1, "count": 200}).get("results", []):
+                if p.get("slug"):
+                    mine[p["slug"]][p.get("status") or "?"] += 1
+        batch = [{**_hit(c["slug"], c.get("title"), c.get("level_of_description")),
+                  "children_count": c.get("children_count"), "my_proposals": dict(mine.get(c["slug"], {}))} for c in kids]
+        total = data.get("total", len(kids))
+        totals: dict[str, int] = defaultdict(int)
+        for b in batch:
+            for st, k in b["my_proposals"].items():
+                totals[st] += k
+        return {
+            "source": SOURCE, "parent": {"title": parent.get("title"), "url": _url(slug)}, "total_children": total,
+            "batch": batch, "batch_proposals_by_status": dict(totals),
+            "proposals_left_this_hour": _budget(key) if key else 0,
+            "next_skip": s + n if s + n < total else None,
+            **({} if key else {"message": "Read-only here: proposing needs you to be signed in."}),
+        }
+    return _logged("work_through_series", {"slug": slug, "limit": limit, "skip": skip}, ctx, run)
+
+
+@mcp.tool()
 def get_authority(slug: str, ctx: Context | None = None) -> dict:
     """Read an authority record (a person, family or organisation) by its slug."""
     key = _caller_key(ctx)
@@ -475,6 +527,27 @@ def _needs_key(ctx: Context | None) -> str:
     return key
 
 
+_spent: dict[str, deque] = defaultdict(deque)
+_spent_lock = threading.Lock()
+
+
+def _budget(key: str, n: int = 0) -> int:
+    """Spend n proposal items for this key and return what is left this hour.
+    Refuses, spending nothing, when n would go over the cap."""
+    k = hashlib.sha256(key.encode()).hexdigest()
+    now = time.time()
+    with _spent_lock:
+        q = _spent[k]
+        while q and q[0] < now - 3600:
+            q.popleft()
+        if n and len(q) + n > PROPOSAL_CAP:
+            wait = int(q[0] + 3600 - now) // 60 + 1 if q else 60
+            raise Refused(f"At most {PROPOSAL_CAP} proposals an hour per person; {PROPOSAL_CAP - len(q)} left. "
+                          f"Try again in about {wait} minutes, or propose fewer at once.")
+        q.extend([now] * n)
+        return PROPOSAL_CAP - len(q)
+
+
 @mcp.tool()
 def list_my_proposals(status: Literal["pending", "approved", "edited", "linked", "rejected", "new_record_created", "parked"] | None = None,
                       limit: int = 25, skip: int = 0, ctx: Context | None = None) -> dict:
@@ -522,6 +595,7 @@ def propose_access_points_and_dates(slug: str, proposals: list[Proposal], ctx: C
         items = [p for p in proposals if p.value.strip()]
         if not items:
             return {"queued": [], "message": "Nothing to propose.", "source": SOURCE}
+        _budget(key, len(items))
         if BACKEND == "atom-ahg":
             out = _api("POST", f"/descriptions/{slug}/proposals", key, json={"source": "glam-mcp", "entities": [
                 {"type": ENTITY_TYPES[p.kind], "value": p.value.strip(), "evidence": p.evidence, "sources": p.sources,
@@ -584,6 +658,7 @@ def propose_relationships(slug: str, relationships: list[Relationship], ctx: Con
 
     def run():
         key = _needs_key(ctx)
+        _budget(key, len(relationships))
         if BACKEND != "atom-ahg":
             _read_base(slug, key)
             return {"source": SOURCE, "url": _url(slug), "applied": False, "proposals": [r.model_dump() for r in relationships],
@@ -630,6 +705,7 @@ def propose_description_change(
         key = _needs_key(ctx)
         if not text.strip():
             return {"queued": False, "message": "Nothing to propose.", "source": SOURCE}
+        _budget(key, 1)
         if BACKEND == "atom-ahg":
             out = _api("POST", f"/descriptions/{slug}/proposals", key, json={"source": "glam-mcp", "fields": [
                 {"field": field, "text": text, "evidence": evidence, "sources": sources or []}]})
@@ -667,6 +743,7 @@ def propose_transcription(slug: str, text: str, digital_object_id: int | None = 
         key = _needs_key(ctx)
         if not text.strip():
             return {"queued": False, "message": "Nothing to propose.", "source": SOURCE}
+        _budget(key, 1)
         if BACKEND != "atom-ahg":
             _read_base(slug, key)
             return {"source": SOURCE, "url": _url(slug), "applied": False, "text": text,
@@ -704,6 +781,7 @@ def propose_translation(
         key = _needs_key(ctx)
         if not text.strip():
             return {"queued": False, "message": "Nothing to propose.", "source": SOURCE}
+        _budget(key, 1)
         if BACKEND != "atom-ahg":
             _read_base(slug, key)
             return {"source": SOURCE, "url": _url(slug), "applied": False, "field": field, "language": language, "text": text,
