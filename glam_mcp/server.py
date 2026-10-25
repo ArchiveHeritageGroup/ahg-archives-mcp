@@ -335,8 +335,8 @@ def work_through_series(slug: str, limit: int = 10, skip: int = 0, ctx: Context 
     still make this hour, and next_skip for the next batch (null when done).
     For each child: read it (get_record, and get_record_text or get_record_image
     when its text is thin), skip it when your proposals there are still pending,
-    propose, then move on. Call again with skip=next_skip until it is null. A
-    child with children of its own is a series: work through it the same way.
+    propose, then move on. Call again with skip=next_skip until it is null. When
+    get_record shows a child has children of its own, work through it the same way.
     """
     key = _caller_key(ctx)
 
@@ -353,7 +353,7 @@ def work_through_series(slug: str, limit: int = 10, skip: int = 0, ctx: Context 
                 if p.get("slug"):
                     mine[p["slug"]][p.get("status") or "?"] += 1
         batch = [{**_hit(c["slug"], c.get("title"), c.get("level_of_description")),
-                  "children_count": c.get("children_count"), "my_proposals": dict(mine.get(c["slug"], {}))} for c in kids]
+                  "my_proposals": dict(mine.get(c["slug"], {}))} for c in kids]
         total = data.get("total", len(kids))
         totals: dict[str, int] = defaultdict(int)
         for b in batch:
