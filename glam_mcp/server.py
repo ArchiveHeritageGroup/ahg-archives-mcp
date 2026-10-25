@@ -122,7 +122,8 @@ mcp = FastMCP(
         "base every suggestion on its text (and, where its text is thin, on the file's text from get_record_text or what get_record_image shows), "
         "look each name and place up with search_authorities and give the id of the existing record it most likely is, "
         "check list_my_proposals so you do not repeat what an archivist already rejected, "
-        "and call propose_access_points_and_dates; for text fields call "
+        "and call propose_access_points_and_dates; for relationships between people stated in the record "
+        "(married to, child of), call propose_relationships after proposing both names; for text fields call "
         "propose_description_change. Give evidence and source URLs for everything, especially facts "
         "found on the web. Proposals are reviewed by an archivist; never describe them as saved."
     ),
@@ -541,6 +542,65 @@ def propose_access_points_and_dates(slug: str, proposals: list[Proposal], ctx: C
                        "so nothing was saved. Apply these on the record's edit screen.",
         }
     return _logged("propose_access_points_and_dates", args, ctx, run)
+
+
+# The relation types stock AtoM installs (Actor relation type taxonomy); the API also
+# accepts a catalogue's own terms by name.
+RELATIONS = Literal[
+    "is the spouse of", "is the parent of", "is the child of", "is the sibling of", "is the grandparent of",
+    "is the grandchild of", "is the cousin of", "is the superior of", "is the subordinate of", "controls",
+    "is controlled by", "is the owner of", "is owned by", "is the predecessor of", "is the successor of",
+    "is the provider of", "is the client of", "is the business partner of", "is the associate of", "is the friend of",
+]
+
+
+class Relationship(BaseModel):
+    subject: str = Field(description="The first person or organisation, as proposed for this record or as named in the catalogue.")
+    relation: RELATIONS = Field(description='How the subject relates to the object, read "subject relation object".')
+    object: str = Field(description="The second person or organisation.")
+    subject_existing_id: int | None = Field(None, description="Id from search_authorities when the subject already has an authority record.")
+    object_existing_id: int | None = Field(None, description="Id from search_authorities when the object already has an authority record.")
+    date: str = Field("", description='When it held, as written, e.g. "married 2 May 1898" or "1898-1949".')
+    start_date: str = Field("", description="Start as YYYY-MM-DD, only when the exact day is known.")
+    end_date: str = Field("", description="End as YYYY-MM-DD, only when the exact day is known.")
+    evidence: str = Field("", description="The line in the record, or the source, that states it.")
+    sources: list[str] = Field(default_factory=list, description="URLs of web sources used, if any.")
+
+
+@mcp.tool()
+def propose_relationships(slug: str, relationships: list[Relationship], ctx: Context | None = None) -> dict:
+    """Propose relationships between people or organisations that a record states,
+    such as a marriage or parent and child in a family register.
+
+    Each side must be an existing authority record (give its id from
+    search_authorities) or a person or organisation you have already proposed
+    for this record with propose_access_points_and_dates. Give the line that
+    states each relationship as evidence. An archivist reviews them in AI >
+    Relationship review; approved ones show on both authority records. Needs
+    the archivist's own staff key.
+    """
+    args = {"slug": slug, "count": len(relationships)}
+
+    def run():
+        key = _needs_key(ctx)
+        if BACKEND != "atom-ahg":
+            _read_base(slug, key)
+            return {"source": SOURCE, "url": _url(slug), "applied": False, "proposals": [r.model_dump() for r in relationships],
+                    "message": "This catalogue's API cannot add relationships, so nothing was saved. Add them on the authority records' edit screens."}
+        out = _api("POST", f"/descriptions/{slug}/proposals", key, json={"source": "glam-mcp", "relationships": [
+            {"subject_name": r.subject.strip(), "subject_actor_id": r.subject_existing_id, "relation": r.relation,
+             "object_name": r.object.strip(), "object_actor_id": r.object_existing_id, "date": r.date,
+             "start_date": r.start_date, "end_date": r.end_date, "evidence": r.evidence, "sources": r.sources}
+            for r in relationships]})
+        results = out.get("relationships", [])
+        return {
+            "source": SOURCE, "url": _url(slug), "results": results,
+            "already_proposed": out.get("relationships_skipped_existing", 0),
+            "review_url": out.get("relationship_review_url") or PUBLIC_BASE + "/ai/relationship/review",
+            "message": ("Queued for review. Nothing changes until an archivist approves it."
+                        if any(r.get("queued") for r in results) else "Nothing new was queued; see each result."),
+        }
+    return _logged("propose_relationships", args, ctx, run)
 
 
 @mcp.tool()

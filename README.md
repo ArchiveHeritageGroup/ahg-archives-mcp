@@ -18,13 +18,14 @@ In development. See it in action on AtoM: [AtoM MCP Server in Action](https://yo
 | `get_record_image` | The record's reference image, for the assistant to look at. |
 | `list_my_proposals` | Your proposals and what became of them (pending, approved, linked, rejected...), so rejected ones are not repeated. Signed-in only. |
 | `propose_access_points_and_dates` | Propose people, organisations, places and dates, each with its evidence and sources. People and organisations may carry dates of existence, a history and places for a new authority record. A name or place may point at an existing record (`existing_id`), which the archivist sees as the first candidate to link. |
+| `propose_relationships` | Propose relationships a record states between people or organisations (spouse, parent, child and the other AtoM relation types), with dates and the line that states them; approved ones show on both authority records. |
 | `propose_description_change` | Propose new text for one field of a description (title, scope and content, archival history and others). |
 
 What a caller sees follows AtoM's own permissions: unpublished records, hidden children and master files stay hidden from callers who could not see them in AtoM. `tests/no_leak.py` checks this against a live catalogue.
 
 ## Backends
 
-- **`atom-ahg`** (default): AtoM with the AHG Extensions, through REST API v2 (`ahgAPIPlugin`). Needs atom-ahg-plugins v3.121.61 or later for `list_my_proposals`, v3.121.60 for `search_authorities` and `existing_id`, v3.121.45 for authority details on proposals (v3.121.43 for the rest). Proposals are queued in AI > NER review and AI > Suggest review for an archivist; with the Authority Resolution plugin they also reach its queue.
+- **`atom-ahg`** (default): AtoM with the AHG Extensions, through REST API v2 (`ahgAPIPlugin`). Needs atom-ahg-plugins v3.121.62 or later for `propose_relationships`, v3.121.61 for `list_my_proposals`, v3.121.60 for `search_authorities` and `existing_id`, v3.121.45 for authority details on proposals (v3.121.43 for the rest). Proposals are queued in AI > NER review and AI > Suggest review for an archivist; with the Authority Resolution plugin they also reach its queue.
 - **Heratio** (planned, heratio#1558): Heratio's REST API v2 has the same shape. Once it gains the proposals and record-text endpoints and returns provenance in the full record, the `atom-ahg` backend serves Heratio too.
 - **`atom-base`**: stock AtoM, through its own REST API. Read tools work; proposals are returned to the assistant for the archivist to apply by hand, because the stock API cannot add access points without overwriting them.
 
