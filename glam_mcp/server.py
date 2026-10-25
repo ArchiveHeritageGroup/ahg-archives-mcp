@@ -121,6 +121,7 @@ mcp = FastMCP(
         "points (people, organisations, places) and dates for a record, read it with get_record, "
         "base every suggestion on its text (and, where its text is thin, on the file's text from get_record_text or what get_record_image shows), "
         "look each name and place up with search_authorities and give the id of the existing record it most likely is, "
+        "check list_my_proposals so you do not repeat what an archivist already rejected, "
         "and call propose_access_points_and_dates; for text fields call "
         "propose_description_change. Give evidence and source URLs for everything, especially facts "
         "found on the web. Proposals are reviewed by an archivist; never describe them as saved."
@@ -470,6 +471,29 @@ def _needs_key(ctx: Context | None) -> str:
     if not key:
         raise NeedsCallerKey()
     return key
+
+
+@mcp.tool()
+def list_my_proposals(status: Literal["pending", "approved", "edited", "linked", "rejected", "new_record_created", "parked"] | None = None,
+                      limit: int = 25, skip: int = 0, ctx: Context | None = None) -> dict:
+    """List the proposals you made and what became of them, newest first.
+
+    Each shows the record, the name, place, date or field text proposed, and its
+    status: pending, approved, edited, linked (to an authority record), rejected,
+    new_record_created or parked, with who reviewed it and when. Check it before
+    proposing for a record, and do not propose again what was rejected. Needs the
+    archivist's own staff key.
+    """
+    args = {"status": status, "limit": limit, "skip": skip}
+
+    def run():
+        key = _needs_key(ctx)
+        if BACKEND != "atom-ahg":
+            return {"found": False, "message": "This catalogue keeps no proposals: they are returned for the archivist to apply.", "source": SOURCE}
+        data = _api("GET", "/proposals", key, params={"mine": 1, "count": _limit(limit), "start": max(0, int(skip)), **({"status": status} if status else {})})
+        results = [{**r, "url": _url(r["slug"]) if r.get("slug") else None} for r in data.get("results", [])]
+        return {"source": SOURCE, "total": data.get("total", len(results)), "results": results}
+    return _logged("list_my_proposals", args, ctx, run)
 
 
 @mcp.tool()
