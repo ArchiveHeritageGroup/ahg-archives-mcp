@@ -119,7 +119,9 @@ mcp = FastMCP(
         f"Search and read archival descriptions held in the {SOURCE}. Always cite the record URL "
         "given in each result, and say which institution the record comes from. To suggest access "
         "points (people, organisations, places) and dates for a record, read it with get_record, "
-        "base every suggestion on its text (and, where its text is thin, on the file's text from get_record_text or what get_record_image shows), and call propose_access_points_and_dates; for text fields call "
+        "base every suggestion on its text (and, where its text is thin, on the file's text from get_record_text or what get_record_image shows), "
+        "look each name and place up with search_authorities and give the id of the existing record it most likely is, "
+        "and call propose_access_points_and_dates; for text fields call "
         "propose_description_change. Give evidence and source URLs for everything, especially facts "
         "found on the web. Proposals are reviewed by an archivist; never describe them as saved."
     ),
@@ -329,6 +331,38 @@ def get_authority(slug: str, ctx: Context | None = None) -> dict:
     return _logged("get_authority", {"slug": slug}, ctx, run)
 
 
+PLACES_TAXONOMY_ID = 42
+AUTHORITY_KINDS = {"person": "person", "organisation": "organization", "family": "family"}
+
+
+@mcp.tool()
+def search_authorities(name: str, kind: Literal["person", "organisation", "family", "place"] = "person",
+                       limit: int = 10, ctx: Context | None = None) -> dict:
+    """Find existing authority records (people, organisations, families) or places by name.
+
+    Every word must appear in the name, in any order, so "Hendrik Engelbrecht"
+    also finds "Engelbrecht, Hendrik". Use it before proposing a name or place:
+    when one of the results is the same person, organisation or place, pass its
+    id as existing_id in propose_access_points_and_dates, so the archivist links
+    the existing record instead of creating a new one.
+    """
+    key = _caller_key(ctx)
+
+    def run():
+        if BACKEND != "atom-ahg":
+            return {"found": False, "message": "This catalogue's API cannot search authority records.", "source": SOURCE}
+        n = _limit(limit)
+        if kind == "place":
+            terms = _api("GET", f"/taxonomies/{PLACES_TAXONOMY_ID}/terms", key, params={"search": name}).get("terms", [])
+            hits = [{"id": t["id"], "name": t.get("name"), "kind": "place"} for t in terms[:n]]
+            return {"source": SOURCE, "total": len(terms), "results": hits}
+        data = _api("GET", "/authorities", key, params={"search": name, "entity_type": AUTHORITY_KINDS[kind], "limit": n})
+        hits = [{"id": a["id"], "name": a.get("authorized_form_of_name"), "kind": kind, "slug": a.get("slug"),
+                 "url": _url(a["slug"]) if a.get("slug") else None} for a in data.get("results", [])]
+        return {"source": SOURCE, "total": data.get("total", len(hits)), "results": hits}
+    return _logged("search_authorities", {"name": name, "kind": kind, "limit": limit}, ctx, run)
+
+
 @mcp.tool()
 def get_iiif_manifest(slug: str, ctx: Context | None = None) -> dict:
     """Return the IIIF manifest URL for a record's images, for viewing in a IIIF viewer."""
@@ -427,6 +461,8 @@ class Proposal(BaseModel):
     dates_of_existence: str = Field("", description='Person or organisation only: life or existence dates for a new authority record, e.g. "1874-1949".')
     history: str = Field("", description="Person or organisation only: a short biographical or administrative history, from the record or a named source.")
     places: str = Field("", description="Person or organisation only: places associated with them, separated by semicolons.")
+    existing_id: int | None = Field(None, description="Id from search_authorities of the existing record this most likely is (not for dates).")
+    link_reason: str = Field("", description="With existing_id: why it is the same person, organisation or place, e.g. matching dates or places.")
 
 
 def _needs_key(ctx: Context | None) -> str:
@@ -444,7 +480,10 @@ def propose_access_points_and_dates(slug: str, proposals: list[Proposal], ctx: C
     reliable source you name, supports; give the evidence and source URLs for
     each. For a person or organisation, also give dates_of_existence, a short
     history and places when the record or a source states them: they pre-fill
-    the new authority record if the archivist creates one. Nothing on the record
+    the new authority record if the archivist creates one. Look names and places
+    up with search_authorities first; when one is already in the catalogue, give
+    its id as existing_id and why in link_reason, and the archivist sees it as
+    the first candidate to link. Nothing on the record
     changes: an archivist reviews every proposal.
     On AtoM with the AHG extensions they are queued in AI > NER review; on stock
     AtoM they are returned for the archivist to apply. Needs the archivist's own
@@ -461,7 +500,9 @@ def propose_access_points_and_dates(slug: str, proposals: list[Proposal], ctx: C
             out = _api("POST", f"/descriptions/{slug}/proposals", key, json={"source": "glam-mcp", "entities": [
                 {"type": ENTITY_TYPES[p.kind], "value": p.value.strip(), "evidence": p.evidence, "sources": p.sources,
                  **({"authority": a} if (a := {k: v.strip() for k, v in (("dates_of_existence", p.dates_of_existence), ("history", p.history), ("places", p.places)) if v.strip()})
-                    and p.kind in ("person", "organisation") else {})} for p in items]})
+                    and p.kind in ("person", "organisation") else {}),
+                 **({("term_id" if p.kind == "place" else "actor_id"): p.existing_id, "link_reason": p.link_reason}
+                    if p.existing_id and p.kind != "date" else {})} for p in items]})
             return {
                 "source": SOURCE, "url": _url(slug), "queued": out.get("queued", []),
                 "already_proposed_or_linked": out.get("skipped_existing", 0),
