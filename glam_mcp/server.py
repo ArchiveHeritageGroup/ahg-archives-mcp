@@ -209,7 +209,8 @@ def _api(method: str, path: str, key: str | None = None, **kw) -> Any:
     if r.status_code == 404:
         raise NotVisible()
     # 501: the catalogue lacks what this needs (e.g. AHG API without the AI plugin's review queues).
-    if r.status_code in (401, 403, 501):
+    # 429: the key's hourly or daily limit is used up (atom-ahg-plugins#223).
+    if r.status_code in (401, 403, 429, 501):
         try:
             message = r.json().get("message") or "Not authorised"
         except Exception:
