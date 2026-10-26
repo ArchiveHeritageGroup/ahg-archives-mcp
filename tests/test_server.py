@@ -157,7 +157,8 @@ def _field(label, value_html):
             f'{label}</h3><div class="col-9 p-2">{value_html}</div></div>')
 
 
-STOCK_PAGE = "<html><body><h1>Item TEST-1 - Letter of 1902 about Pretoria</h1>" + "".join([
+RECORD_BODY = '<body class="d-flex flex-column min-vh-100 sfIsadPlugin index">'
+STOCK_PAGE = "<html>" + RECORD_BODY + "<h1>Item TEST-1 - Letter of 1902 about Pretoria</h1>" + "".join([
     _field("Reference code", "TEST-1"),
     _field("Title", "Letter of 1902 about Pretoria"),
     _field("Date(s)", '<ul class="m-0"><li> 1902-05-03 (Creation) </li></ul>'),
@@ -175,6 +176,14 @@ STOCK_API = {
     "archival_history": "Bought from a private dealer in 1987", "place_access_points": ["Pretoria", "Secret farm"],
     "notes": ["Donor restriction applies to the Engelbrecht papers"],
 }
+
+
+class LevelNames(Base):
+    def test_ahg_search_gives_level_names_not_term_ids(self):
+        self.cat.json("POST", "cat.example.org/api/v2/search", {"total": 1, "results": [{"slug": "bible", "title": "Bible", "level_of_description": 242}]})
+        self.cat.json("GET", "cat.example.org/api/v2/taxonomies/34/terms", {"terms": [{"id": 242, "name": "Item"}]})
+        catalogue._levels.clear()
+        self.assertEqual(server.search_records("bible")["results"][0]["level"], "Item")
 
 
 class StockFields(Base):
@@ -206,6 +215,15 @@ class StockFields(Base):
         self.assertIsNone(r["notes"])  # the text is on the page, but not under a note heading
         self.assertNotIn("Draft", json.dumps(r))
         self.assertFalse([q for q in self.cat.seen if "/api/" in q.url.path])  # the API is not even asked
+
+    def test_a_bot_check_page_is_neither_a_record_nor_visible(self):
+        # Seen on a live site (26 Oct 2026): 200 with a script that sends the browser to /challenge.
+        challenge = "<html><head><title>Redirecting</title></head><body><script>window.location.href = '/challenge';</script></body></html>"
+        self.cat.routes[("GET", "stock.example.org/rec")] = httpx.Response(200, text=challenge)
+        with self.assertRaises(catalogue.NotARecordPage):
+            catalogue._read_base("rec", None)
+        catalogue._visible_cache.clear()
+        self.assertFalse(catalogue._visitor_sees("rec"))  # so a draft behind a bot check never reaches search
 
     def test_hidden_record_is_not_found(self):
         self.cat.routes[("GET", "stock.example.org/rec")] = httpx.Response(302, headers={"location": "/user/login"})

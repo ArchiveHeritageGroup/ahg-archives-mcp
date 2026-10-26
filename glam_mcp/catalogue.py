@@ -92,6 +92,26 @@ def _api(method: str, path: str, key: str | None = None, **kw) -> Any:
     return body.get("data", body) if isinstance(body, dict) and "data" in body else body
 
 
+_levels: dict[str, tuple[float, dict[int, str]]] = {}
+
+
+def level_name(level: Any) -> Any:
+    """AHG API search gives the level of description as a term id; its name comes
+    from the level taxonomy (34), read with the service key and kept an hour.
+    Anything that is not an id is returned as it is."""
+    if not isinstance(level, int):
+        return level
+    hit = _levels.get(_c.api_base)
+    if not hit or hit[0] < time.time() - 3600:
+        try:
+            terms = _api("GET", "/taxonomies/34/terms", _c.key).get("terms", [])
+            hit = (time.time(), {t["id"]: t["name"] for t in terms if t.get("name")})
+        except Exception:
+            hit = (time.time() - 3300, hit[1] if hit else {})  # try again in five minutes
+        _levels[_c.api_base] = hit
+    return hit[1].get(level, level)
+
+
 def _url(slug: str) -> str:
     return f"{_c.public_base}/{slug}"
 
@@ -127,6 +147,22 @@ def _read_ahg(slug: str, key: str | None) -> dict:
 _visible_cache: dict[tuple[str, str], tuple[float, bool]] = {}
 
 
+# AtoM's layout names the module and action on <body>; a description's own page is
+# one of the description modules with the "index" action. A bot check, sign-in or
+# error page answering 200 has no such class. ponytail: a custom theme that drops
+# this class makes records unreadable (fails closed); widen the pattern for it.
+_RECORD_PAGE = re.compile(r'<body[^>]*class="[^"]*\b(?:informationobject|sfIsadPlugin|sfRadPlugin|sfDcPlugin|sfModsPlugin|arDacsPlugin)\s+index\b')
+
+
+class NotARecordPage(Refused):
+    """The site answered 200 with something other than the record page (e.g. a bot check)."""
+
+    def __init__(self):
+        super().__init__("The catalogue's site answered with something other than the record page (for example a bot check), "
+                         "so the record could not be read. Search and get_children still work; the site can let this "
+                         "service's User-Agent past its check.", "unavailable")
+
+
 def _visitor_sees(slug: str) -> bool:
     """Stock AtoM only: may a visitor open this record's page? Its REST API checks
     only "read", never "view draft", so any key reads drafts (AtoM 2.10.2). The
@@ -139,7 +175,7 @@ def _visitor_sees(slug: str) -> bool:
         return hit[1]
     try:
         r = _client.get(f"{_c.public_base}/{slug}", headers={"Accept": "text/html"}, follow_redirects=False)
-        ok = r.status_code == 200 and not _off_network(r)
+        ok = r.status_code == 200 and not _off_network(r) and bool(_RECORD_PAGE.search(r.text))
     except httpx.HTTPError:
         ok = False
     if len(_visible_cache) > 5000:
@@ -163,6 +199,8 @@ def _page_sections(slug: str) -> dict[str, str] | None:
         return None
     if r.status_code != 200 or _off_network(r):
         return None
+    if not _RECORD_PAGE.search(r.text):
+        raise NotARecordPage()
     parts = re.split(r"<h([1-4])[^>]*>(.*?)</h\1>", r.text, flags=re.S)
     sections: dict[str, str] = {}
     for level, label, body in zip(parts[1::3], parts[2::3], parts[3::3]):

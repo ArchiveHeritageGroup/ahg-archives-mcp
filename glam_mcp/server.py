@@ -202,7 +202,8 @@ def search_records(query: str, limit: int = 10, skip: int = 0, catalogue: str = 
         n, s = _limit(limit), max(0, int(skip))
         if _c.backend == "atom-ahg":
             data = _api("POST", "/search", key, json={"query": query, "limit": n, "skip": s})
-            hits = [_hit(h["slug"], h.get("title"), h.get("level_of_description")) for h in data.get("results", []) if h.get("slug")]
+            hits = [_hit(h["slug"], h.get("title"), adapters.level_name(h.get("level_of_description")))
+                    for h in data.get("results", []) if h.get("slug")]
         elif _c.backend == "openric":
             # Title search only; each hit is read for its citable page.
             hits = []
