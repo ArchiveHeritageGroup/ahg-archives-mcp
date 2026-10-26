@@ -214,7 +214,34 @@ class StockFields(Base):
         self.assertNotIn("Secret farm", r["places"])
         self.assertIsNone(r["notes"])  # the text is on the page, but not under a note heading
         self.assertNotIn("Draft", json.dumps(r))
-        self.assertFalse([q for q in self.cat.seen if "/api/" in q.url.path])  # the API is not even asked
+        # The API is asked only for the list of children, each then checked against its page.
+        self.assertEqual({q.url.path for q in self.cat.seen if "/api/" in q.url.path}, {"/api/informationobjects/tree/rec"})
+
+    def test_parents_from_the_breadcrumb_and_visible_children_counted(self):
+        crumbs = ('<ol class="breadcrumb"><li class="breadcrumb-item"><a href="/index.php/fonds" title="F">The fonds</a></li>'
+                  '<li class="breadcrumb-item"><a href="/index.php/hidden-series">Hidden</a></li>'
+                  '<li class="breadcrumb-item active" aria-current="page">Letter</li></ol>')
+        self.cat.routes[("GET", "stock.example.org/rec")] = httpx.Response(200, text=STOCK_PAGE.replace("<h1>", crumbs + "<h1>", 1))
+        self.cat.routes[("GET", "stock.example.org/fonds")] = httpx.Response(200, text=STOCK_PAGE)
+        self.cat.routes[("GET", "stock.example.org/hidden-series")] = httpx.Response(302, headers={"location": "/user/login"})
+        self.cat.json("GET", "stock.example.org/api/informationobjects/tree/rec", {"children": [{"slug": "kid"}, {"slug": "draft-kid"}]})
+        self.cat.routes[("GET", "stock.example.org/kid")] = httpx.Response(200, text=STOCK_PAGE)
+        self.cat.routes[("GET", "stock.example.org/draft-kid")] = httpx.Response(302, headers={"location": "/user/login"})
+        catalogue._visible_cache.clear()
+        r = catalogue._read_base("rec", None)
+        self.assertEqual(r["part_of"], [{"title": "The fonds", "url": "https://stock.example.org/fonds"}])
+        self.assertEqual(r["children_count"], 1)
+
+    def test_get_children_answers_a_draft_as_a_missing_record(self):
+        # The API refuses a draft (401) but fails differently on a missing slug; neither may show.
+        self.cat.json("GET", "stock.example.org/api/informationobjects/tree/draft", {"message": "Not authorized"}, 401)
+        self.cat.routes[("GET", "stock.example.org/draft")] = httpx.Response(302, headers={"location": "/user/login"})
+        settings.CATALOGUES = {"Home": settings.HOME, "Stock": self.stock}
+        catalogue._visible_cache.clear()
+        draft = server.get_children("draft", catalogue="Stock")
+        missing = server.get_children("no-such-slug", catalogue="Stock")
+        self.assertEqual((draft["error"], missing["error"]), ("not_found", "not_found"))
+        self.assertFalse([q for q in self.cat.seen if "/tree/" in q.url.path])
 
     def test_a_bot_check_page_is_neither_a_record_nor_visible(self):
         # Seen on a live site (26 Oct 2026): 200 with a script that sends the browser to /challenge.

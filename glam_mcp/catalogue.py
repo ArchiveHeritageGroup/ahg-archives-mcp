@@ -201,6 +201,7 @@ def _page_sections(slug: str) -> dict[str, str] | None:
         return None
     if not _RECORD_PAGE.search(r.text):
         raise NotARecordPage()
+    crumbs = re.search(r'<ol class="breadcrumb">(.*?)</ol>', r.text, flags=re.S)
     parts = re.split(r"<h([1-4])[^>]*>(.*?)</h\1>", r.text, flags=re.S)
     sections: dict[str, str] = {}
     for level, label, body in zip(parts[1::3], parts[2::3], parts[3::3]):
@@ -209,6 +210,7 @@ def _page_sections(slug: str) -> dict[str, str] | None:
             sections.setdefault("_heading", label)
         elif label:
             sections[label] = sections.get(label, "") + body
+    sections["_breadcrumb"] = crumbs.group(1) if crumbs else ""
     return sections
 
 
@@ -257,8 +259,32 @@ def _read_base(slug: str, key: str | None) -> dict:
         "names": names, "subjects": _items_under(sections, "Subject access points") or None,
         "places": _items_under(sections, "Place access points") or None,
         "notes": _text_under(sections, "Note", "Notes", "General note", "Archivist's note"),
-        "repository": _text_under(sections, "Repository"), "part_of": [], "children_count": None, "images": [],
+        "repository": _text_under(sections, "Repository"), "part_of": _ancestors(sections), "children_count": _visible_children(slug, key),
+        "images": [],
     }
+
+
+def _ancestors(sections: dict[str, str]) -> list[dict]:
+    """Stock AtoM: the records above this one, from the breadcrumb a visitor sees
+    (top first), each kept only if a visitor may open it."""
+    out = []
+    for href, title in re.findall(r'<li class="breadcrumb-item">\s*<a href="([^"]+)"[^>]*>(.*?)</a>', sections.get("_breadcrumb", ""), flags=re.S):
+        slug = href.rstrip("/").rsplit("/", 1)[-1]
+        if slug and _visitor_sees(slug):
+            out.append({"title": _clean(title), "url": _url(slug)})
+    return out
+
+
+def _visible_children(slug: str, key: str | None, cap: int = 50) -> int | None:
+    """Stock AtoM: how many records directly below this one a visitor may open.
+    The API lists them (drafts too), so each is checked against its public page.
+    ponytail: None above cap children, rather than one page fetch each; raise the
+    cap or count from search if large fonds need a number."""
+    try:
+        kids = [c["slug"] for c in (_api("GET", f"/informationobjects/tree/{slug}", key).get("children") or []) if c.get("slug")]
+    except Exception:
+        return None
+    return sum(1 for k in kids if _visitor_sees(k)) if len(kids) <= cap else None
 
 
 # ── OpenRiC (RiC-O JSON-LD at /api/ric/v1, read only) ───────────────────────
