@@ -41,7 +41,7 @@ Since v0.6.0 no field on stock AtoM comes from its REST API: every value is read
 ## Interoperability (items 16 to 18)
 
 - Heratio: atom-ahg backend unchanged, checked by heratio-dev on Heratio dev with all 17 tools; leak test 40 hidden / 201 checks (as shipped) and 60 hidden / 299 checks (with embargo, classification and ICIP fixtures).
-- OpenRiC: adapter built and unit tested against its real response shapes; since OpenRiC v0.17.26 (published only) checked locally against ric.theahg.co.za: search, full record with date ranges, children, and a draft answering not found. Leak test pending (needs read access to its database).
+- OpenRiC: adapter built and unit tested against its real response shapes; since OpenRiC v0.17.26 (published only) checked locally against ric.theahg.co.za: search, full record with date ranges, children, and a draft answering not found. Leak test passed (see below).
 
 ## Reliability (items 9, 10, 11, 13)
 
@@ -60,6 +60,10 @@ Since v0.6.0 no field on stock AtoM comes from its REST API: every value is read
 
 - `pip-audit`: the only findings were in the base image's pip (12 known issues); pip is upgraded in the image, and the scan of everything the service runs reports no known vulnerabilities. CI runs the scan on every push (failing on findings) and keeps a CycloneDX SBOM with the run. `SECURITY.md` describes reporting.
 
+## OpenRiC reference service leak test
+
+26 October 2026, ric.theahg.co.za through a test MCP (openric backend, no key), hidden list from the Heratio database it reads (drafts, embargo, classification, ICIP; read only): 17 hidden records, 73 checks, all passed; control `title-of-object` found. Calls answered "rate limited" are retried and never counted as a pass (OpenRiC allows 60 requests a minute).
+
 ## OpenRiC Workspace leak test
 
 26 October 2026, workspace.openric.org through a test MCP (openric backend): the hidden list from Workspace's own database (`tests/openric_workspace_hidden.sql`: deleted, or no published authorised name; 1 of 981 records), 1 hidden record, 4 checks, all passed. Negative control: a published record listed as hidden fails both get_record and search, so the test can fail. Workspace's API takes no key and serves the public view only, so no key can widen it. Not covered: records hidden only by the Public role's permissions.
@@ -75,6 +79,5 @@ Heratio (26 October 2026): service key checked (reads only what a visitor sees);
 ## Pending
 
 - Item 5: sign-in through a real browser (`tests/SIGNIN_TEST.md`).
-- OpenRiC reference service leak test: `stuff/test-openric-leak.sh` on the AHG host (needs the MySQL password for the Heratio database it reads).
 - Item 7: independent security assessment.
 - Item 25: pilot with a partner institution.
