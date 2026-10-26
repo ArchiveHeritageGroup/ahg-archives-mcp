@@ -27,6 +27,18 @@ jobs:
           pip install -q "mcp<2"
           GLAM_MCP_URL=http://127.0.0.1:8099/mcp CATALOGUE_DB_CNF="$RUNNER_TEMP/db.cnf" CATALOGUE_DB=atom \
             PUBLIC_CONTROL_SLUG=published-letter python tests/no_leak.py
+      - name: No-leak test through a second catalogue
+        # The same test catalogue, read as a catalogue other than the home one
+        # (GLAM_OTHER_CATALOGUES, the path demo catalogues use too).
+        run: |
+          docker run -d --name mcp2 --network host -e GLAM_PORT=8098 -e CATALOGUE_URL=http://127.0.0.1:8097 \
+            -e CATALOGUE_NAME="Home" -e CATALOGUE_API_KEY="$READER_KEY" \
+            -e GLAM_OTHER_CATALOGUES="[{\"name\": \"Second\", \"url\": \"http://127.0.0.1:8097\", \"key\": \"$READER_KEY\"}]" glam-mcp
+          for i in $(seq 30); do curl -sf http://127.0.0.1:8098/healthz && break; sleep 2; done
+          GLAM_MCP_URL=http://127.0.0.1:8098/mcp CATALOGUE_DB_CNF="$RUNNER_TEMP/db.cnf" CATALOGUE_DB=atom \
+            PUBLIC_CONTROL_SLUG=published-letter TEST_CATALOGUE=Second python tests/no_leak.py
       - name: Logs on failure
         if: failure()
-        run: docker logs mcp 2>&1 | tail -50
+        run: |
+          docker logs mcp 2>&1 | tail -50
+          docker logs mcp2 2>&1 | tail -50 || true

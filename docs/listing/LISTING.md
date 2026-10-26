@@ -14,7 +14,7 @@ Only what a visitor of the catalogue may see comes back: drafts, embargoed, secu
 
 Catalogue staff who connect with their own key can go further. The assistant proposes access points and dates (linked to existing authority records where it finds them), relationships between people, transcriptions of scanned pages and translations, each with its evidence and sources. Nothing changes on a record until an archivist approves it in the catalogue's own review screens.
 
-The same server works with AtoM and the AHG Extensions for AtoM, and with stock AtoM through its own REST API, where proposals come back as a file for AtoM's CSV import. Institutions can run it for their own catalogue.
+The same server works with AtoM and the AHG Extensions for AtoM, and with stock AtoM through its own REST API, where proposals come back as a file for AtoM's CSV import. One server can read several catalogues, and the assistant chooses which one, or searches them all at once. Institutions can run it for their own catalogue.
 
 ## Facts
 
@@ -35,7 +35,7 @@ The same server works with AtoM and the AHG Extensions for AtoM, and with stock 
 
 ## Tools
 
-search_records, get_record, get_children, work_through_series, get_authority, search_authorities, get_iiif_manifest, get_record_text, get_record_image, list_my_proposals, propose_access_points_and_dates, propose_relationships, propose_description_change, propose_transcription, propose_translation.
+list_catalogues, search_records, get_record, get_children, work_through_series, get_authority, search_authorities, get_iiif_manifest, get_record_text, get_record_image, list_my_proposals, propose_access_points_and_dates, propose_relationships, propose_description_change, propose_transcription, propose_translation.
 
 ## Where to list
 
@@ -44,4 +44,4 @@ search_records, get_record, get_children, work_through_series, get_authority, se
 | Official MCP Registry | `mcp-publisher` with server.json from this folder | A DNS TXT record on theahg.co.za (domain namespace) |
 | Other public MCP directories | Their submission forms, using the text above | Usually a public repository or a public endpoint (the public endpoint is enough for some) |
 
-Before submitting: decide whether the repository goes public (it is AGPL and documents installing for your own catalogue), and whether the listing waits for the Heratio backend (#9), as the roadmap had it.
+Before submitting: make the repository public (stuff/mcp-repo-public.sh; history checked clean 26 Oct 2026), add the DNS TXT record for the registry name, and decide whether the listing waits for the Heratio backend (#9), as the roadmap had it.
