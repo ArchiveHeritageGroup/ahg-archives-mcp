@@ -27,6 +27,7 @@ stock CSV import file. Everything that talks to a catalogue is here.
 import csv
 import html
 import io
+import ipaddress
 import re
 import time
 from collections import defaultdict
@@ -51,8 +52,27 @@ class Refused(Exception):
         self.message = message
 
 
+def _off_network(r: httpx.Response) -> bool:
+    """Demo catalogues only (added by staff on a web page): did this answer come
+    from somewhere other than a public address? The name was checked when it
+    was added, but it can point elsewhere by the time a connection is made
+    (DNS rebinding), so this looks at the address actually connected to, before
+    anything from it is used."""
+    if not _c.demo:
+        return False
+    stream = r.extensions.get("network_stream")
+    addr = stream.get_extra_info("server_addr") if stream else None
+    # ponytail: a transport that reports no address (the unit tests' fake) passes.
+    return bool(addr) and not ipaddress.ip_address(addr[0]).is_global
+
+
+OFF_NETWORK = "This catalogue's address now leads to a non-public address, so it is not read."
+
+
 def _api(method: str, path: str, key: str | None = None, **kw) -> Any:
     r = _client.request(method, _c.api_base + path, headers={_c.key_header: key or _c.key}, **kw)
+    if _off_network(r):
+        raise Refused(OFF_NETWORK)
     if r.status_code == 404:
         raise NotVisible()
     # 501: the catalogue lacks what this needs (e.g. AHG API without the AI plugin's review queues).
@@ -114,7 +134,8 @@ def _visitor_sees(slug: str) -> bool:
     if hit and hit[0] > now - 300:
         return hit[1]
     try:
-        ok = _client.get(f"{_c.public_base}/{slug}", headers={"Accept": "text/html"}, follow_redirects=False).status_code == 200
+        r = _client.get(f"{_c.public_base}/{slug}", headers={"Accept": "text/html"}, follow_redirects=False)
+        ok = r.status_code == 200 and not _off_network(r)
     except httpx.HTTPError:
         ok = False
     if len(_visible_cache) > 5000:
@@ -133,47 +154,86 @@ def _names_base(d: dict) -> list:
     return out
 
 
-def _page_text(slug: str) -> str | None:
-    """Stock AtoM only: the record's public page as a visitor gets it, as plain
-    text (tags dropped, entities read, spaces collapsed); None when hidden."""
+def _clean(fragment: str) -> str:
+    return " ".join(html.unescape(re.sub(r"<[^>]+>", " ", fragment)).split())
+
+
+def _page_sections(slug: str) -> dict[str, str] | None:
+    """Stock AtoM only: the record's public page as a visitor gets it, as
+    {heading: the text under it until the next heading}; None when hidden.
+    AtoM 2.10 shows each field as a heading (h3, or h4 inside an area)
+    followed by its value."""
     try:
         r = _client.get(f"{_c.public_base}/{slug}", headers={"Accept": "text/html"}, follow_redirects=False)
     except httpx.HTTPError:
         return None
-    if r.status_code != 200:
+    if r.status_code != 200 or _off_network(r):
         return None
-    return " ".join(html.unescape(re.sub(r"<[^>]+>", " ", r.text)).split())
+    parts = re.split(r"<h[2-4][^>]*>(.*?)</h[2-4]>", r.text, flags=re.S)
+    sections: dict[str, str] = {}
+    for label, body in zip(parts[1::2], parts[2::2]):
+        label = _clean(label)
+        if label:
+            sections[label] = (sections.get(label, "") + " " + _clean(body)).strip()
+    return sections
 
 
-def _shown(value: Any, page: str) -> Any:
-    """The part of a field a visitor sees on the page, or None. Lists keep only
-    the items shown. A text counts as shown when its first 80 characters are."""
+# Each stock API field, and the headings its value appears under on the public page.
+FIELD_HEADINGS = {
+    "reference_code": ("Reference code",),
+    "dates": ("Date(s)",),
+    "extent_and_medium": ("Extent and medium",),
+    "scope_and_content": ("Scope and content",),
+    "archival_history": ("Archival history",),
+    "creators": ("Name of creator",),
+    "name_access_points": ("Name access points",),
+    "subject_access_points": ("Subject access points",),
+    "place_access_points": ("Place access points",),
+    "notes": ("Note", "Notes", "General note", "Archivist's note"),
+    "repository": ("Repository",),
+}
+
+
+def _shown(value: Any, shown_text: str) -> Any:
+    """The part of a field a visitor sees, or None. shown_text is what the page
+    shows under that field's own heading. A text counts as shown only when the
+    whole of it appears there, not as part of a longer word, number or date; lists keep only the items shown. Text the page
+    renders differently (markup) is dropped: fail closed."""
     if isinstance(value, list):
-        kept = [v for v in value if _shown(v, page) is not None]
+        kept = [v for v in value if _shown(v, shown_text) is not None]
         return kept or None
     text = value
     if isinstance(value, dict):
         text = next((value[k] for k in ("content", "date", "authorized_form_of_name", "name", "title") if value.get(k)), "")
     text = " ".join(str(text or "").split())
-    return value if text and text[:80] in page else None
+    # Whole value only, standing on its own: "1902" is not shown by "1902-05-03",
+    # nor "Anna" by "Annabel".
+    return value if text and re.search(r"(?<![\w-])" + re.escape(text) + r"(?![\w-])", shown_text) else None
+
+
+def _field(d: dict, name: str, sections: dict[str, str]) -> Any:
+    under = " | ".join(sections.get(h, "") for h in FIELD_HEADINGS[name])
+    return _shown(d.get(name), under)
 
 
 def _read_base(slug: str, key: str | None) -> dict:
     """Stock AtoM's REST API returns fields the site may hide from visitors
-    (visible-elements settings, archivist's notes). Every field is kept only
-    where the public page shows it, for every caller. ponytail: staff with their
-    own key see visitor fields too here; full staff reads need the AHG API."""
-    page = _page_text(slug)
-    _visible_cache[(_c.public_base, slug)] = (time.time(), page is not None)
-    if page is None:
+    (visible-elements settings, archivist's notes). Each field is kept only
+    where the public page shows the whole value under that field's own heading,
+    for every caller. ponytail: staff with their own key see visitor fields too
+    here; full staff reads need the AHG API."""
+    sections = _page_sections(slug)
+    _visible_cache[(_c.public_base, slug)] = (time.time(), sections is not None)
+    if sections is None:
         raise NotVisible()
     d = _api("GET", f"/informationobjects/{slug}", key)
-    f = lambda name: _shown(d.get(name), page)  # noqa: E731
+    f = lambda name: _field(d, name, sections)  # noqa: E731
+    names = _names_base({"creators": f("creators") or [], "name_access_points": f("name_access_points") or []})
     return {
         "found": True, "source": _c.name, "url": _url(slug), "slug": slug,
         "title": d.get("title"), "reference_code": f("reference_code"), "level": d.get("level_of_description"),
         "dates": f("dates"), "extent": f("extent_and_medium"), "scope_and_content": f("scope_and_content"),
-        "archival_history": f("archival_history"), "names": _shown(_names_base(d), page) or [],
+        "archival_history": f("archival_history"), "names": names,
         "subjects": f("subject_access_points"), "places": f("place_access_points"), "notes": f("notes"),
         "repository": f("repository"), "part_of": [], "children_count": None, "images": [],
     }
@@ -201,6 +261,8 @@ def _fetch_image(ref: str) -> tuple[bytes, str]:
     if _c.demo and (why := _not_public(ref)):
         raise ImageRefused("off_site", why)
     with _client.stream("GET", ref, headers={"Accept": "image/*"}, follow_redirects=False) as r:
+        if _off_network(r):
+            raise ImageRefused("off_site", OFF_NETWORK)
         if r.status_code != 200:
             raise ImageRefused("error:http", "The image could not be fetched. Try again later.")
         ctype = r.headers.get("content-type", "").split(";")[0].strip().lower()

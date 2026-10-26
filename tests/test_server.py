@@ -147,14 +147,71 @@ class Images(Base):
         self.assertEqual((data, fmt), (PNG, "png"))
 
 
-class StockFields(unittest.TestCase):
-    def test_only_fields_the_page_shows(self):
-        page = "Published letter Letter from Jan Pretorius to his sister Anna Pretoria Jan Pretorius 1902-05-03"
-        self.assertEqual(catalogue._shown("Letter from Jan Pretorius to his sister Anna", page), "Letter from Jan Pretorius to his sister Anna")
-        self.assertIsNone(catalogue._shown("Archivist's note: donor asked for this to stay private", page))
-        self.assertEqual(catalogue._shown(["Pretoria", "Secret place"], page), ["Pretoria"])
-        self.assertEqual(catalogue._shown([{"date": "1902-05-03", "type": "Creation"}], page), [{"date": "1902-05-03", "type": "Creation"}])
-        self.assertIsNone(catalogue._shown([], page))
+def _field(label, value_html):
+    """One field as AtoM 2.10 renders it on a public record page."""
+    return (f'<div class="field text-break row g-0"><h3 class="h6 lh-base m-0 text-muted col-3 border-end text-end p-2">'
+            f'{label}</h3><div class="col-9 p-2">{value_html}</div></div>')
+
+
+STOCK_PAGE = "<html><body><h1>Letter of 1902 about Pretoria</h1>" + "".join([
+    _field("Title", "Letter of 1902 about Pretoria"),
+    _field("Date(s)", '<ul><li> 1902-05-03 (Creation) </li></ul>'),
+    _field("Scope and content", "<p>Letter from Jan Pretorius to his sister Anna, Pretoria, 3 May 1902.</p>"),
+    _field("Archival history", ""),  # hidden from visitors by the visible-elements settings: shown empty
+    _field("Place access points", '<ul><li><a href="/pretoria">Pretoria</a></li></ul>'),
+    _field("Name access points", '<ul><li><a href="/jan">Jan Pretorius</a></li></ul>'),
+]) + "<h2>Explore</h2><p>Donor restriction applies to the Engelbrecht papers</p></body></html>"
+
+STOCK_API = {
+    "title": "Letter of 1902 about Pretoria", "reference_code": "TEST-1",
+    "dates": [{"date": "1902-05-03", "type": "Creation"}, {"date": "1902", "type": "Accumulation"}],
+    "scope_and_content": "Letter from Jan Pretorius to his sister Anna, Pretoria, 3 May 1902.",
+    "archival_history": "Pretoria",  # hidden, and a word that is on the page elsewhere
+    "place_access_points": ["Pretoria", "Secret farm"],
+    "name_access_points": ["Jan Pretorius", "Anna Pretorius"],
+    "creators": [{"authorized_form_of_name": "Jan Pretorius"}],
+    "notes": ["Donor restriction applies to the Engelbrecht papers"],  # on the page, but not under a note heading
+}
+
+
+class StockFields(Base):
+    def setUp(self):
+        super().setUp()
+        self.stock = settings.Catalogue("Stock", "https://stock.example.org", "https://stock.example.org/api", "atom-base", "svc", "REST-API-Key")
+        self.token = settings._current.set(self.stock)
+        self.cat.routes[("GET", "stock.example.org/rec")] = httpx.Response(200, text=STOCK_PAGE)
+        self.cat.json("GET", "stock.example.org/api/informationobjects/rec", STOCK_API)
+
+    def tearDown(self):
+        settings._current.reset(self.token)
+        super().tearDown()
+
+    def test_shown_fields_pass(self):
+        r = catalogue._read_base("rec", None)
+        self.assertEqual(r["scope_and_content"], STOCK_API["scope_and_content"])
+        self.assertEqual(r["places"], ["Pretoria"])
+        self.assertEqual(r["dates"], [{"date": "1902-05-03", "type": "Creation"}])
+
+    def test_a_value_that_appears_elsewhere_on_the_page_is_not_shown(self):
+        r = catalogue._read_base("rec", None)
+        self.assertIsNone(r["archival_history"])  # "Pretoria" is on the page, but not under Archival history
+        self.assertIsNone(r["notes"])  # the note's text is on the page, but not under a note heading
+
+    def test_short_values_and_unlisted_items_are_dropped(self):
+        r = catalogue._read_base("rec", None)
+        self.assertNotIn({"date": "1902", "type": "Accumulation"}, r["dates"] or [])  # "1902" is on the page, not as this date
+        self.assertNotIn("Secret farm", r["places"])
+        self.assertEqual(r["names"], ["Jan Pretorius"])  # Anna is not an access point on the page; creators heading absent
+        self.assertIsNone(r["reference_code"])  # no Reference code heading on this page
+
+    def test_only_the_whole_value_counts(self):
+        sections = {"Scope and content": "Letter from Jan Pretorius to his sister Anna"}
+        self.assertIsNone(catalogue._shown("Letter from Jan Pretorius to his sister Anna, and a private remark", sections["Scope and content"]))
+
+    def test_hidden_record_is_not_found(self):
+        self.cat.routes[("GET", "stock.example.org/rec")] = httpx.Response(302, headers={"location": "/user/login"})
+        with self.assertRaises(catalogue.NotVisible):
+            catalogue._read_base("rec", None)
 
 
 class Proposals(Base):
@@ -195,6 +252,88 @@ class KeyCheck(Base):
     def test_private_addresses_refused(self):
         for url in ("http://127.0.0.1:8097", "http://10.0.0.5", "file:///etc/passwd", "localhost"):
             self.assertIsNotNone(keycheck.not_public(url), url)
+
+
+class _Connected:
+    """What httpx reports as a response's network stream: the address connected to."""
+    def __init__(self, ip):
+        self.ip = ip
+
+    def get_extra_info(self, name):
+        return (self.ip, 443) if name == "server_addr" else None
+
+
+class Rebinding(Base):
+    def setUp(self):
+        super().setUp()
+        self.demo = settings.Catalogue("Demo", "https://demo.example.net", "https://demo.example.net/api/v2", "atom-ahg", "k", "X-API-Key", demo=True)
+        self.token = settings._current.set(self.demo)
+
+    def tearDown(self):
+        settings._current.reset(self.token)
+        super().tearDown()
+
+    def _answer(self, ip, path="demo.example.net/api/v2/descriptions/x", **kw):
+        self.cat.routes[("GET", path)] = httpx.Response(200, json={"title": "T"}, extensions={"network_stream": _Connected(ip)}, **kw)
+
+    def test_demo_answer_from_a_private_address_is_refused(self):
+        self._answer("10.0.0.7")
+        with self.assertRaises(catalogue.Refused) as e:
+            catalogue._api("GET", "/descriptions/x")
+        self.assertIn("non-public address", e.exception.message)
+
+    def test_demo_answer_from_a_public_address_is_used(self):
+        self._answer("169.1.190.139")
+        self.assertEqual(catalogue._api("GET", "/descriptions/x")["title"], "T")
+
+    def test_demo_image_from_a_private_address_is_refused(self):
+        self.cat.routes[("GET", "demo.example.net/x.png")] = httpx.Response(
+            200, content=PNG, headers={"content-type": "image/png"}, extensions={"network_stream": _Connected("127.0.0.1")})
+        catalogue._not_public, real = (lambda url: None), catalogue._not_public  # the name looked public when checked
+        try:
+            with self.assertRaises(catalogue.ImageRefused) as e:
+                catalogue._fetch_image("https://demo.example.net/x.png")
+        finally:
+            catalogue._not_public = real
+        self.assertEqual(e.exception.outcome, "off_site")
+
+    def test_configured_catalogues_are_not_checked(self):
+        settings._current.reset(self.token)
+        self.token = settings._current.set(settings.HOME)
+        self.cat.routes[("GET", "cat.example.org/api/v2/descriptions/x")] = httpx.Response(
+            200, json={"title": "T"}, extensions={"network_stream": _Connected("10.0.0.7")})
+        self.assertEqual(catalogue._api("GET", "/descriptions/x")["title"], "T")  # an operator's own choice, e.g. a LAN catalogue
+
+
+class Health(Base):
+    def _health(self, response):
+        if response is not None:
+            self.cat.routes[("GET", "cat.example.org/api/v2/descriptions")] = response
+        import asyncio
+        r = asyncio.run(server.healthz(None))
+        return r.status_code, json.loads(r.body)["status"]
+
+    def test_states(self):
+        self.assertEqual(self._health(httpx.Response(200, json={"data": {"results": []}})), (200, "ok"))
+        self.assertEqual(self._health(httpx.Response(403, json={"message": "Read scope required"})), (503, "key_refused"))
+        self.assertEqual(self._health(httpx.Response(500, text="boom")), (503, "not_working"))
+
+    def test_unreachable(self):
+        def down(request):
+            raise httpx.ConnectError("no route")
+        catalogue._client = httpx.Client(transport=httpx.MockTransport(down))
+        self.assertEqual(self._health(None), (503, "unreachable"))
+
+
+class DataFolder(unittest.TestCase):
+    def test_signed_in_service_needs_a_writable_data_folder(self):
+        import subprocess
+        env = {**os.environ, "GLAM_AUTH": "oauth", "GLAM_DATA": "/nonexistent/folder", "MCP_PUBLIC_URL": "https://mcp.example.org",
+               "MCP_SECRET": "x"}
+        r = subprocess.run([sys.executable, "-c", "import glam_mcp.calls"], env=env, capture_output=True, text=True,
+                           cwd=os.path.join(os.path.dirname(__file__), ".."))
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("GLAM_DATA must be a writable folder", r.stderr)
 
 
 class Logs(Base):

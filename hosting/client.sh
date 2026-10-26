@@ -3,7 +3,9 @@
 # (signed-in and public), its own address, keys, logs, usage and demo pages.
 #
 #   hosting/client.sh add <client> "<Catalogue name>" <catalogue-url> [host]
-#   hosting/client.sh publish <client>    nginx site + certificate (sudo; after DNS)
+#   hosting/client.sh leak-test <client> "<note>"   record that tests/no_leak.py passed against
+#                                         the client's catalogue (who ran it, when, how many checks)
+#   hosting/client.sh publish <client>    nginx site + certificate (sudo; after DNS and the leak test)
 #   hosting/client.sh check <client>      service health and the key check again
 #   hosting/client.sh list
 #   hosting/client.sh remove <client>     stops it; keeps its logs under clients/.removed-*
@@ -67,8 +69,17 @@ ENV
   echo "Running for $NAME on 127.0.0.1:$SIGNED (signed-in) and :$PUBLIC (public)."
   echo "Next: DNS for $HOST (CNAME to theahg.ddns.net), then: $0 publish $2"
   ;;
+leak-test)
+  D=$(dir_of "${2:-}"); [ -e "$D/.env" ] || die "No client $2"
+  [ -n "${3:-}" ] || die "Usage: $0 leak-test <client> \"<who ran tests/no_leak.py, when, how many checks passed>\""
+  echo "$(date -Is) $3" >> "$D/leak-test.txt"
+  echo "Recorded for $2. It may now be published."
+  ;;
 publish)
   D=$(dir_of "${2:-}"); [ -e "$D/.env" ] || die "No client $2"
+  # The key check samples records; only tests/no_leak.py with the catalogue's database
+  # proves nothing hidden comes back. A client goes public only after it has passed.
+  [ -s "$D/leak-test.txt" ] || die "No leak test recorded for $2. Run tests/no_leak.py against their catalogue (with them), then: $0 leak-test $2 \"<note>\""
   HOST=$(env_of "$D" HOST); SITE=/etc/nginx/sites-available/$HOST.conf
   getent hosts "$HOST" >/dev/null || die "$HOST does not resolve yet. Add the DNS record first."
   sed "s/@HOST@/$HOST/g; s/@SIGNED@/$(env_of "$D" SIGNED_PORT)/g; s/@PUBLIC@/$(env_of "$D" PUBLIC_PORT)/g" hosting/nginx-client.conf | sudo tee "$SITE" >/dev/null

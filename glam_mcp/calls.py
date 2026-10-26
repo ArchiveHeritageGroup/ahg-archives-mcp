@@ -34,7 +34,7 @@ import time
 from mcp.server.fastmcp import Context
 
 from glam_mcp.catalogue import NotVisible, Refused
-from glam_mcp.settings import _c, _catalogues, _current, HOME, log, PROPOSAL_CAP, SIGNED_IN_URL
+from glam_mcp.settings import _c, _catalogues, _current, AUTH_MODE, HOME, log, PROPOSAL_CAP, SIGNED_IN_URL
 
 
 # The sign-in provider (server.py sets it on the signed-in service); None on the public one.
@@ -131,8 +131,11 @@ try:
     _cap_db = sqlite3.connect(os.path.join(os.environ.get("GLAM_DATA", "/data"), "proposal-cap.db"), check_same_thread=False)
     _cap_db.execute("SELECT 1")
 except sqlite3.OperationalError:
-    # No writable GLAM_DATA (a bare test run): counted in memory, reset on restart.
-    logging.getLogger("glam-mcp").warning("GLAM_DATA not writable: the hourly proposal limit resets on restart")
+    # The signed-in service takes proposals: its limit must survive a restart.
+    if AUTH_MODE == "oauth":
+        raise SystemExit("GLAM_DATA must be a writable folder on the signed-in service (sign-in store and proposal limit)")
+    # The public service takes no proposals (a bare test run, or no data folder): in memory is enough.
+    logging.getLogger("glam-mcp").warning("GLAM_DATA not writable: the hourly proposal limit is kept in memory")
     _cap_db = sqlite3.connect(":memory:", check_same_thread=False)
 _cap_db.execute("CREATE TABLE IF NOT EXISTS spent (key TEXT NOT NULL, ts REAL NOT NULL)")
 _cap_db.execute("CREATE INDEX IF NOT EXISTS spent_key_ts ON spent (key, ts)")

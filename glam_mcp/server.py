@@ -688,12 +688,16 @@ def propose_translation(
 
 @mcp.custom_route("/healthz", methods=["GET"])
 async def healthz(request: Request) -> JSONResponse:
+    """ok only when the catalogue answers a real read with the service key;
+    otherwise unreachable, key_refused or not_working, with 503."""
     try:
-        r = adapters._client.get(_c.api_base + ("" if _c.backend == "atom-ahg" else "/informationobjects?limit=1"), headers={_c.key_header: _c.key})
-        ok = r.status_code < 500
+        r = adapters._client.get(_c.api_base + ("/descriptions?limit=1" if _c.backend == "atom-ahg" else "/informationobjects?limit=1"),
+                                 headers={_c.key_header: _c.key})
+        state = "ok" if r.status_code == 200 else "key_refused" if r.status_code in (401, 403) else "not_working"
     except Exception:
-        ok = False
-    return JSONResponse({"status": "ok" if ok else "degraded", "backend": _c.backend, "auth": AUTH_MODE, "source": _c.name, "api": ok}, status_code=200 if ok else 503)
+        state = "unreachable"
+    return JSONResponse({"status": state, "backend": _c.backend, "auth": AUTH_MODE, "source": _c.name, "api": state == "ok"},
+                        status_code=200 if state == "ok" else 503)
 
 
 if AUTH_MODE == "oauth":

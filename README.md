@@ -42,11 +42,16 @@ What a caller sees follows AtoM's own permissions: unpublished records, hidden c
 - **Reads go through the catalogue's API only**, never its database, and follow its own permissions. A caller with no key of their own reads with the service key, so that key must read no more than a visitor does: the server checks it at start-up (`glam_mcp/keycheck.py`) and refuses to start with a staff key or one that reads records a visitor cannot open. The check samples the newest records; `tests/no_leak.py` with database access is the full test.
 - **Nothing is written to a record by the assistant.** Proposals go to the catalogue's review queues; an archivist approves each one. A caller's own key is used only with the home catalogue and is never sent to another.
 - **Images** are fetched only from the catalogue's own host and port (a file link must be a plain path), without following redirects, image types only, read in pieces and stopped at 3 MB. A demo catalogue's host must also be a public address.
-- **Stock AtoM** returns every field through its API, including ones the site hides from visitors, so only fields the record's public page shows are passed on.
+- **Stock AtoM** returns every field through its API, including ones the site hides from visitors, so a field is passed on only when the record's public page shows its whole value under that field's own heading (a value elsewhere on the page, or as part of a longer word or date, does not count). Text the page renders differently is dropped: it fails closed. This is still inference from the public page, not an access policy enforced by AtoM, which its REST API does not offer; AtoM with the AHG Extensions applies visibility in the API itself.
+- **Demo catalogues** are added by staff on a web page, so their address is checked when added and again on every connection: an answer that comes from a non-public address (the name now pointing inside a network) is refused before it is used.
 - **Limits:** each catalogue key has its own hourly limit, and may have a daily cap and an end date (set in the catalogue); each signed-in person may queue at most `GLAM_PROPOSAL_CAP` proposal items an hour, kept on disk.
 - **Logs** keep the tool, catalogue and outcome, but free text (search words, names, proposed text) only as its length and a short hash; owner-only files, deleted after `GLAM_LOG_DAYS` (90). Sign-in tokens are stored as hashes and catalogue keys encrypted.
 
-An independent source review (26 October 2026) shaped v0.5.0. Sign-in through a real browser has its own test (`tests/SIGNIN_TEST.md`, about 10 minutes, then `tests/signin_check.py`); its first run is pending. Still open: the stock AtoM field filter is by text match on the public page, so staff with their own key also see visitor fields only on stock AtoM.
+Visibility on stock AtoM is remembered for five minutes per record (a deliberate choice for speed): a record unpublished there can still appear in search results for up to five minutes, though a full read checks again at once. On AtoM with the AHG Extensions there is no such delay.
+
+`/healthz` answers `ok` (200) only when the catalogue answers a real read with the service key, and otherwise `unreachable`, `key_refused` or `not_working` (503).
+
+Two independent source reviews (26 October 2026) shaped v0.5.0 to v0.5.2. The unit tests, the leak test and the leak test through a second catalogue run in the project's image on every push; each release tag publishes the image only after they pass (GitHub Actions, workflows `no-leak` and `image`). Sign-in through a real browser has its own test (`tests/SIGNIN_TEST.md`, about 10 minutes, then `tests/signin_check.py`); its first run is pending. Still open: the stock AtoM field filter is by text match on the public page, so staff with their own key also see visitor fields only on stock AtoM.
 
 ## Code layout
 
@@ -111,7 +116,7 @@ A required setting that is missing stops the server at start with its name, rath
 | `MCP_SECRET` | With `oauth` | Fernet key that encrypts stored catalogue keys. |
 | `MCP_SIGNED_IN_URL` | No | Where the public endpoint tells people to sign in to propose changes. |
 | `GLAM_HTTP_PATH` | No | Endpoint path, e.g. `/mcp` or `/public/mcp`. |
-| `GLAM_DATA` | No | Folder for the sign-in store (tokens hashed, keys encrypted), the hourly proposal limit and demo catalogues. Mount it on both services. |
+| `GLAM_DATA` | Signed-in service | Folder for the sign-in store (tokens hashed, keys encrypted), the hourly proposal limit and demo catalogues. Mount it on both services; the signed-in service will not start without it. |
 | `GLAM_CALL_LOG` | No | Optional JSON-lines log of tool calls: tool, catalogue, outcome, and for free text (search words, names, proposed text) only its length and a short hash. Readable by the service's user only, one file a day. |
 | `GLAM_LOG_DAYS` | No | Days of call logs kept before deletion (default 90). |
 | `GLAM_PROPOSAL_CAP` | No | Proposal items one signed-in person may queue per hour (default 200). |
@@ -144,14 +149,15 @@ Each version tag (`v0.4.0` and on) runs the no-leak tests and then publishes `gh
 `hosting/client.sh` runs the service for other institutions' catalogues on one host, one pair of services (signed-in and public) per client, each with its own address, sign-in secret, logs, usage page and demo catalogues:
 
     hosting/client.sh add <client> "<Catalogue name>" <catalogue-url> [host]   # asks for the client's service key
-    hosting/client.sh publish <client>    # nginx site and certificate (sudo), once DNS for the host resolves
+    hosting/client.sh leak-test <client> "<note>"   # record that tests/no_leak.py passed against their catalogue
+    hosting/client.sh publish <client>    # nginx site and certificate (sudo), once DNS resolves and a leak test is recorded
     hosting/client.sh check <client>      # health, and the key check again
     hosting/client.sh list
     hosting/client.sh remove <client>     # stops it, deletes key and secret, keeps the logs
 
 The host defaults to `<client>.mcp.theahg.co.za`, ports are taken from 8041 up, and each client's settings live in `clients/<client>/.env` (mode 600, not in git). `GLAM_IMAGE` picks the image.
 
-Before anything starts, the client's key is checked (`glam_mcp/keycheck.py`): a key that may list everyone's proposals is a staff key and is refused, and a sample of the newest records it reads must each open for a visitor on the public site. That is a spot check; the full check is `tests/no_leak.py` with the catalogue's database, which the client can run. The same key check guards the demo catalogues page.
+Before anything starts, the client's key is checked (`glam_mcp/keycheck.py`): a key that may list everyone's proposals is a staff key and is refused, and a sample of the newest records it reads must each open for a visitor on the public site. That is a spot check. The full check is `tests/no_leak.py` with the catalogue's database, run with the client: `publish` refuses until its result is recorded with `leak-test`. The same key check guards the demo catalogues page, where catalogues are read-only and listed for seven days.
 
 ## Usage figures
 
@@ -159,7 +165,7 @@ The signed-in service serves a staff page at `/usage`: calls per day, per tool, 
 
 ## Tests
 
-`tests/test_server.py` and `tests/test_auth.py` run against a fake catalogue, with no network: every read tool's answers and refusals (401, 403, 404, 429, 501, 500), catalogue choice and keys, image fetching (own host only, no redirects, image types only, size limit), stock AtoM field filtering, the hourly proposal limit, the key check, log contents, and sign-in (hashed tokens, encrypted keys, single-use codes, rotation, revocation, a key revoked at the catalogue). CI runs them on every push:
+`tests/test_server.py` and `tests/test_auth.py` (39 tests) run against a fake catalogue, with no network: every read tool's answers and refusals (401, 403, 404, 429, 501, 500), catalogue choice and keys, image fetching (own host only, no redirects, image types only, size limit), demo catalogues answering from a non-public address, stock AtoM field filtering (including values that appear elsewhere on the page, short values and partial values), the health states, the data folder rule, the hourly proposal limit, the key check, log contents, and sign-in (hashed tokens, encrypted keys, single-use codes, rotation, revocation, a key revoked at the catalogue). CI runs them on every push:
 
     docker run --rm -v "$PWD/tests:/app/tests:ro" ahg/glam-mcp:phase2 python -m unittest discover -s tests -p 'test_*.py'
 
@@ -174,6 +180,7 @@ The signed-in service serves a staff page at `/usage`: calls per day, per tool, 
 
 ## Versions
 
+- **v0.5.2** (26 Oct 2026): after a second review. Stock AtoM fields matched as whole values under their own heading only; demo catalogues checked against the address actually connected to (DNS rebinding); the signed-in service requires a writable data folder; `/healthz` tells unreachable, key refused and not working apart; hosted clients need a recorded leak test before going public. 39 unit tests.
 - **v0.5.1** (26 Oct 2026): `server.py` split into the MCP layer, catalogue adapters, per-call policy and settings (no change in behaviour); sign-in test through a real browser (`tests/SIGNIN_TEST.md`, `tests/signin_check.py`).
 - **v0.5.0** (26 Oct 2026): security and reliability release after an independent source review. Image fetching bound to the catalogue's own host; service-key check at start-up; stock AtoM fields only as the public page shows them; logs without free text, rotated and deleted after 90 days; hourly proposal limit kept on disk; unit tests (fake catalogue) in CI.
 - **v0.4.0** (26 Oct 2026): several catalogues (`list_catalogues`, `catalogue` on every read tool, search across all), demo catalogues page, staff usage page, hosted clients (`hosting/client.sh`), ready-made image, key check.
