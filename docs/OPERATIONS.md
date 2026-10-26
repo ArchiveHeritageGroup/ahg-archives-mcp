@@ -45,7 +45,7 @@ To any published version: set `image: ghcr.io/archiveheritagegroup/ahg-archives-
 
     */5 * * * * /home/johanpiet/glam-mcp/hosting/healthcheck.sh
 
-`/healthz` answers `ok` only when the catalogue answers a real read with the service key; otherwise `unreachable`, `key_refused` or `not_working`. For hosted clients, list their addresses in `GLAM_HEALTH_URLS`.
+`/healthz` answers `ok` only when the catalogue answers a real read with the service key; otherwise `unreachable`, `key_refused` or `not_working`. Both services of every hosted client (`clients/*/.env`) are checked too; set `GLAM_HEALTH_URLS` to check a different list.
 
 ## When something is wrong
 

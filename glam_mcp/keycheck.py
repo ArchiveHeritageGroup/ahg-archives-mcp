@@ -41,7 +41,11 @@ from urllib.parse import urlparse
 
 import httpx
 
-UA = {"User-Agent": "AHG-GLAM-MCP/0.3 (+https://www.atom-extensions.com)", "Accept": "application/json"}
+# One name for every request: PSIS drops generic client user agents (bot protection),
+# and catalogues allow the service by it (fail2ban). Keep the "AHG-GLAM-MCP/" prefix
+# when the version changes.
+USER_AGENT = "AHG-GLAM-MCP/0.7 (+https://www.atom-extensions.com)"
+UA = {"User-Agent": USER_AGENT, "Accept": "application/json"}
 SAMPLE = 40
 
 

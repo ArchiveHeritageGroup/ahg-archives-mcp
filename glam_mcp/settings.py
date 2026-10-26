@@ -29,7 +29,7 @@ import os
 from contextvars import ContextVar
 from dataclasses import dataclass
 
-from glam_mcp.keycheck import BACKENDS, check as keycheck, detect_backend as _detect_backend
+from glam_mcp.keycheck import BACKENDS, USER_AGENT, check as keycheck, detect_backend as _detect_backend
 
 
 def _setting(name: str, old: str = "", default: str | None = None) -> str:
@@ -86,9 +86,6 @@ HTTP_PATH = os.environ.get("GLAM_HTTP_PATH", "/mcp")
 # Where to send people who try to propose on the public, read-only service.
 SIGNED_IN_URL = _setting("MCP_SIGNED_IN_URL", default=(MCP_BASE + HTTP_PATH) if AUTH_MODE == "oauth" else "")
 
-# PSIS's nginx drops requests from generic client user agents (bot protection),
-# so the service names itself.
-USER_AGENT = "AHG-GLAM-MCP/0.2 (+https://www.atom-extensions.com)"
 KEY_HEADER = BACKENDS[BACKEND][1]
 
 

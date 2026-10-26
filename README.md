@@ -147,6 +147,8 @@ To run the no-leak test through a second catalogue, set `TEST_CATALOGUE` to its 
 
 `docs/OPERATIONS.md`: update, back up and restore (`hosting/backup.sh`), roll back, and watch (`hosting/healthcheck.sh`, a Workbench notification when a service stops answering). `SECURITY.md`: how to report a security problem.
 
+Every request to a catalogue carries the User-Agent `AHG-GLAM-MCP/0.7 (+https://www.atom-extensions.com)`. To let the service past fail2ban or bot rules, match on the prefix `AHG-GLAM-MCP/`, which stays the same between versions; the hosted service calls from 169.1.190.139 (theahg.ddns.net).
+
 Tools run in worker threads, so one slow catalogue does not hold other callers up. Load test (`tests/load_test.py`, against a test catalogue, 26 Oct 2026): 25 clients at once, 40 calls a second, no errors, median record read 0.6 s, memory under 60 MB.
 
 ## Ready-made image
