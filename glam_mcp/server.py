@@ -615,6 +615,21 @@ RELATIONS = Literal[
 ]
 
 
+# OpenRiC Workspace names relations by RiC type; each AtoM phrase above as Workspace
+# reads it (its notation or its own wording, which also sets the direction). Not mapped,
+# because RiC has no agent-to-agent equivalent: owner/owned, provider/client - Workspace
+# then says so for that item.
+RIC_RELATIONS = {
+    "is the spouse of": "spouse", "is the sibling of": "sibling", "is the cousin of": "family",
+    "is the parent of": "is the parent of", "is the child of": "is the child of",
+    "is the grandparent of": "is an ancestor of", "is the grandchild of": "is a descendant of",
+    "is the superior of": "has or had as a subordinate", "is the subordinate of": "is or was subordinate to",
+    "controls": "controls or controlled", "is controlled by": "is or was controlled by",
+    "is the predecessor of": "was succeeded by", "is the successor of": "succeeded",
+    "is the business partner of": "work", "is the associate of": "agent-associated", "is the friend of": "knowing",
+}
+
+
 class Relationship(BaseModel):
     subject: str = Field(description="The first person or organisation, as proposed for this record or as named in the catalogue.")
     relation: RELATIONS = Field(description='How the subject relates to the object, read "subject relation object".')
@@ -650,7 +665,8 @@ def propose_relationships(slug: str, relationships: list[Relationship], ctx: Con
             return {"source": _c.name, "url": rec["url"], "applied": False, "proposals": [r.model_dump() for r in relationships],
                     "message": "This catalogue's API cannot add relationships, so nothing was saved. Add them on the authority records' edit screens."}
         out = _api("POST", path, key, json={"source": "glam-mcp", "relationships": [
-            {"subject_name": r.subject.strip(), "subject_actor_id": r.subject_existing_id, "relation": r.relation,
+            {"subject_name": r.subject.strip(), "subject_actor_id": r.subject_existing_id,
+             "relation": RIC_RELATIONS.get(r.relation, r.relation) if _c.backend == "openric" else r.relation,
              "object_name": r.object.strip(), "object_actor_id": r.object_existing_id, "date": r.date,
              "start_date": r.start_date, "end_date": r.end_date, "evidence": r.evidence, "sources": r.sources}
             for r in relationships]})

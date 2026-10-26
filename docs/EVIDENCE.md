@@ -64,9 +64,13 @@ Since v0.6.0 no field on stock AtoM comes from its REST API: every value is read
 
 26 October 2026, ric.theahg.co.za through a test MCP (openric backend, no key), hidden list from the Heratio database it reads (drafts, embargo, classification, ICIP; read only): 17 hidden records, 73 checks, all passed; control `title-of-object` found. Calls answered "rate limited" are retried and never counted as a pass (OpenRiC allows 60 requests a minute).
 
+## OpenRiC Workspace: no bypass (v0.8)
+
+26 October 2026, workspace.openric.org as home catalogue of a signed-in test MCP, with a reviewer's write key (`stuff/test-workspace-v08.sh`): every kind of proposal sent for one record (people, place, date, field change, transcription, translation, relationship). The 12 record tables (record_resources, names, description_values, identifiers, dates, relations, relation_assertions, relation_evidence, instantiations, digital_files, agents, places) were identical by md5 before and after; the proposals table grew (0 to 6, then 6 to 12 on a second run). list_my_proposals listed them as proposed. The relationship, between people with no authority record, came back not queued with Workspace's reason, as its contract says.
+
 ## OpenRiC Workspace leak test
 
-26 October 2026, workspace.openric.org through a test MCP (openric backend): the hidden list from Workspace's own database (`tests/openric_workspace_hidden.sql`: deleted, or no published authorised name; 1 of 981 records), 1 hidden record, 4 checks, all passed. Negative control: a published record listed as hidden fails both get_record and search, so the test can fail. Workspace's API takes no key and serves the public view only, so no key can widen it. Not covered: records hidden only by the Public role's permissions.
+26 October 2026, workspace.openric.org through a test MCP (openric backend): the hidden list from Workspace's own database (`tests/openric_workspace_hidden.sql`: deleted, or no published authorised name; 1 of 981 records), 1 hidden record, 4 checks, all passed; rerun on v0.8, where get_record_text reads `/records/{uuid}/files`. Negative control: a published record listed as hidden fails get_record, get_record_text and search, so the test can fail. Workspace's API takes no key and serves the public view only, so no key can widen it. Not covered: records hidden only by the Public role's permissions.
 
 ## Daily cap (plugins #223)
 

@@ -648,6 +648,12 @@ class WorkspaceFull(Base):
         r = server.propose_relationships(U, [server.Relationship(subject="A", relation="is the spouse of", object="B")])
         self.assertIn("subject_agent_id", r["message"])
 
+    def test_relations_are_sent_as_ric_types(self):
+        self.cat.json("POST", f"{WS}/api/ric/v1/records/{U}/proposals", {"record": U, "relationships": [{"queued": True}]})
+        server.propose_relationships(U, [server.Relationship(subject="A", relation="is the sibling of", object="B", subject_existing_id="a1", object_existing_id="b1")])
+        sent = json.loads(next(q for q in self.cat.seen if q.method == "POST").content)["relationships"][0]
+        self.assertEqual((sent["relation"], sent["subject_actor_id"]), ("sibling", "a1"))
+
     def test_my_proposals_link_to_the_record_page(self):
         self.cat.json("GET", f"{WS}/api/ric/v1/proposals", {"total": 1, "results": [{"kind": "field", "id": "p1", "record": U, "status": "proposed"}]})
         self.assertEqual(server.list_my_proposals()["results"][0]["url"], f"https://{WS}/record/{U}")
