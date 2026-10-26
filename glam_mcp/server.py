@@ -114,7 +114,7 @@ if AUTH_MODE == "oauth":
     _checker = CatalogueKeyChecker(API_BASE, BACKENDS[BACKEND][1],
                                    "AHG-GLAM-MCP/0.3 (+https://www.atom-extensions.com)",
                                    BACKENDS[BACKEND][2])
-    _provider = CatalogueKeyOAuthProvider(_store, _checker, MCP_BASE, SOURCE, PUBLIC_BASE + "/api/keys")
+    _provider = CatalogueKeyOAuthProvider(_store, _checker, MCP_BASE, SOURCE, PUBLIC_BASE + ("/account/api-keys" if BACKEND == "openric" else "/api/keys"))
     _auth_kwargs = {
         "auth_server_provider": _provider,
         "auth": AuthSettings(
@@ -412,6 +412,8 @@ def get_record_text(slug: str, offset: int = 0, limit: int = 20000, catalogue: s
     args = {"slug": slug, "offset": offset, "limit": limit, "catalogue": catalogue}
 
     def run():
+        if _c.backend == "openric" and adapters.ric_workspace(slug):
+            return _ric_text(slug, key, max(0, int(offset)), max(1, min(int(limit), 50000)))
         if _c.backend != "atom-ahg":
             return {"found": False, "error": "unsupported", "message": "This catalogue's API does not publish file text.", "source": _c.name}
         d = _api("GET", f"/descriptions/{slug}/text", key, params={"start": max(0, int(offset)), "chars": max(1, min(int(limit), 50000))})
@@ -421,6 +423,29 @@ def get_record_text(slug: str, offset: int = 0, limit: int = 20000, catalogue: s
                     "message": d.get("note") or "No text is held for this record's files. For an image, use get_record_image."}
         return {"found": True, "source": _c.name, "url": _url(slug), "results": texts}
     return _logged("get_record_text", args, ctx, run)
+
+
+def _ric_text(slug: str, key: str | None, offset: int, limit: int) -> dict:
+    """OpenRiC Workspace: the published transcript of each online instantiation,
+    in the same shape as the AHG API's file text."""
+    d = adapters.ric_files(slug, key)
+    url = f"{_c.public_base}/record/{slug}"
+    texts = [{"source": "transcript", "digital_object_id": i.get("id"), "file": i.get("title"), "language": t.get("language"),
+              "text": (t.get("value") or "")[offset:offset + limit], "more": offset + limit < len(t.get("value") or "")}
+             for i in d.get("instantiations", []) for t in i.get("text", []) if t.get("value")]
+    if not texts:
+        return {"found": True, "source": _c.name, "url": url, "results": [],
+                "message": "No published transcript is held for this record's files. For an image, use get_record_image."}
+    return {"found": True, "source": _c.name, "url": url, "results": texts}
+
+
+def _ric_image(slug: str, key: str | None) -> tuple[str, str, str | None]:
+    """OpenRiC Workspace: (title, record url, reference or thumbnail image url). Masters are never listed."""
+    d = adapters.ric_files(slug, key)
+    files = [f for i in d.get("instantiations", []) for f in i.get("files", [])]
+    pick = next((f for f in files if f.get("use") == "reference" and str(f.get("mime_type", "")).startswith("image/")), None) \
+        or next((f for f in files if f.get("use") == "thumbnail" and str(f.get("mime_type", "")).startswith("image/")), None)
+    return d.get("title") or slug, f"{_c.public_base}/record/{slug}", adapters._file_url(pick.get("path")) if pick else None
 
 
 @tool()
@@ -441,17 +466,21 @@ def get_record_image(slug: str, catalogue: str = "", ctx: Context | None = None)
         return [_unknown_catalogue(catalogue)["message"]]
     token = _current.set(cats[catalogue or HOME.name])
     try:
-        if _c.backend != "atom-ahg":
+        if _c.backend == "openric" and adapters.ric_workspace(slug):
+            title, url, ref = _ric_image(slug, key)  # Workspace answers 404 for a record that is not public
+        elif _c.backend != "atom-ahg":
             outcome = "unsupported"
             return ["This catalogue's API does not publish record images."]
-        rec = _read_ahg(slug, key)  # the API decides whether this caller may see the record and its files
-        ref = next((i.get("reference") or i.get("thumbnail") for i in rec["images"] if i.get("reference") or i.get("thumbnail")), None)
+        else:
+            rec = _read_ahg(slug, key)  # the API decides whether this caller may see the record and its files
+            title, url = rec["title"], rec["url"]
+            ref = next((i.get("reference") or i.get("thumbnail") for i in rec["images"] if i.get("reference") or i.get("thumbnail")), None)
         if not ref:
             outcome = "no_image"
-            return [f"{rec['title']} ({rec['url']}) has no image you may view."]
+            return [f"{title} ({url}) has no image you may view."]
         data, fmt = _fetch_image(ref)
         out = len(data)
-        return [json.dumps({"source": _c.name, "url": rec["url"], "title": rec["title"], "image": ref}), Image(data=data, format=fmt)]
+        return [json.dumps({"source": _c.name, "url": url, "title": title, "image": ref}), Image(data=data, format=fmt)]
     except ImageRefused as e:
         outcome = e.outcome
         return [e.message]
@@ -470,6 +499,21 @@ def get_record_image(slug: str, catalogue: str = "", ctx: Context | None = None)
 
 # ── Proposals ───────────────────────────────────────────────────────────────
 
+def _queue_path(slug: str) -> str | None:
+    """Where this catalogue takes proposals for a record, or None when it keeps
+    no review queue (stock AtoM, the OpenRiC reference service)."""
+    if _c.backend == "atom-ahg":
+        return f"/descriptions/{slug}/proposals"
+    if _c.backend == "openric" and adapters.ric_workspace(slug):
+        return f"/records/{slug}/proposals"
+    return None
+
+
+def _review_url(ahg_path: str) -> str:
+    # OpenRiC Workspace has one review queue for every kind (Manage > Proposals to review).
+    return _c.public_base + ("/proposals" if _c.backend == "openric" else ahg_path)
+
+
 class Proposal(BaseModel):
     kind: Literal["person", "organisation", "place", "date"]
     value: str = Field(description='As it should appear: a name, a place, or a date such as "1954" or "1938-1945".')
@@ -478,7 +522,7 @@ class Proposal(BaseModel):
     dates_of_existence: str = Field("", description='Person or organisation only: life or existence dates for a new authority record, e.g. "1874-1949".')
     history: str = Field("", description="Person or organisation only: a short biographical or administrative history, from the record or a named source.")
     places: str = Field("", description="Person or organisation only: places associated with them, separated by semicolons.")
-    existing_id: int | None = Field(None, description="Id from search_authorities of the existing record this most likely is (not for dates).")
+    existing_id: int | str | None = Field(None, description="Id from search_authorities of the existing record this most likely is (not for dates).")
     link_reason: str = Field("", description="With existing_id: why it is the same person, organisation or place, e.g. matching dates or places.")
 
 
@@ -497,10 +541,15 @@ def list_my_proposals(status: Literal["pending", "approved", "edited", "linked",
 
     def run():
         key = _needs_key(ctx)
-        if _c.backend != "atom-ahg":
+        if _c.backend not in ("atom-ahg", "openric"):
             return {"found": False, "error": "unsupported", "message": "This catalogue keeps no proposals: they are returned for the archivist to apply.", "source": _c.name}
-        data = _api("GET", "/proposals", key, params={"mine": 1, "count": _limit(limit), "start": max(0, int(skip)), **({"status": status} if status else {})})
-        results = [{**r, "url": _url(r["slug"]) if r.get("slug") else None} for r in data.get("results", [])]
+        try:
+            data = _api("GET", "/proposals", key, params={"mine": 1, "count": _limit(limit), "start": max(0, int(skip)), **({"status": status} if status else {})})
+        except NotVisible:  # the OpenRiC reference service has no proposals route
+            return {"found": False, "error": "unsupported", "message": "This catalogue keeps no proposals: they are returned for the archivist to apply.", "source": _c.name}
+        # OpenRiC Workspace names the record by UUID ("record"); its page is /record/<uuid>.
+        results = [{**r, "url": _url(r["slug"]) if r.get("slug") else (f"{_c.public_base}/record/{r['record']}" if r.get("record") else None)}
+                   for r in data.get("results", [])]
         return {"source": _c.name, "total": data.get("total", len(results)), "results": results}
     return _logged("list_my_proposals", args, ctx, run)
 
@@ -530,8 +579,8 @@ def propose_access_points_and_dates(slug: str, proposals: list[Proposal], ctx: C
         if not items:
             return {"queued": [], "message": "Nothing to propose.", "source": _c.name}
         _budget(key, len(items))
-        if _c.backend == "atom-ahg":
-            out = _api("POST", f"/descriptions/{slug}/proposals", key, json={"source": "glam-mcp", "entities": [
+        if path := _queue_path(slug):
+            out = _api("POST", path, key, json={"source": "glam-mcp", "entities": [
                 {"type": ENTITY_TYPES[p.kind], "value": p.value.strip(), "evidence": p.evidence, "sources": p.sources,
                  **({"authority": a} if (a := {k: v.strip() for k, v in (("dates_of_existence", p.dates_of_existence), ("history", p.history), ("places", p.places)) if v.strip()})
                     and p.kind in ("person", "organisation") else {}),
@@ -540,7 +589,7 @@ def propose_access_points_and_dates(slug: str, proposals: list[Proposal], ctx: C
             return {
                 "source": _c.name, "url": _url(slug), "queued": out.get("queued", []),
                 "already_proposed_or_linked": out.get("skipped_existing", 0),
-                "review_url": _c.public_base + "/ai/ner/review",
+                "review_url": _review_url("/ai/ner/review"),
                 "message": ("Queued for review. Nothing on the record changes until an archivist approves it."
                             if out.get("queued") else "Nothing new to queue: these were already proposed or linked for this record."),
             }
@@ -570,8 +619,8 @@ class Relationship(BaseModel):
     subject: str = Field(description="The first person or organisation, as proposed for this record or as named in the catalogue.")
     relation: RELATIONS = Field(description='How the subject relates to the object, read "subject relation object".')
     object: str = Field(description="The second person or organisation.")
-    subject_existing_id: int | None = Field(None, description="Id from search_authorities when the subject already has an authority record.")
-    object_existing_id: int | None = Field(None, description="Id from search_authorities when the object already has an authority record.")
+    subject_existing_id: int | str | None = Field(None, description="Id from search_authorities when the subject already has an authority record.")
+    object_existing_id: int | str | None = Field(None, description="Id from search_authorities when the object already has an authority record.")
     date: str = Field("", description='When it held, as written, e.g. "married 2 May 1898" or "1898-1949".')
     start_date: str = Field("", description="Start as YYYY-MM-DD, only when the exact day is known.")
     end_date: str = Field("", description="End as YYYY-MM-DD, only when the exact day is known.")
@@ -596,11 +645,11 @@ def propose_relationships(slug: str, relationships: list[Relationship], ctx: Con
     def run():
         key = _needs_key(ctx)
         _budget(key, len(relationships))
-        if _c.backend != "atom-ahg":
+        if not (path := _queue_path(slug)):
             rec = _read_record(slug, key)
             return {"source": _c.name, "url": rec["url"], "applied": False, "proposals": [r.model_dump() for r in relationships],
                     "message": "This catalogue's API cannot add relationships, so nothing was saved. Add them on the authority records' edit screens."}
-        out = _api("POST", f"/descriptions/{slug}/proposals", key, json={"source": "glam-mcp", "relationships": [
+        out = _api("POST", path, key, json={"source": "glam-mcp", "relationships": [
             {"subject_name": r.subject.strip(), "subject_actor_id": r.subject_existing_id, "relation": r.relation,
              "object_name": r.object.strip(), "object_actor_id": r.object_existing_id, "date": r.date,
              "start_date": r.start_date, "end_date": r.end_date, "evidence": r.evidence, "sources": r.sources}
@@ -609,7 +658,7 @@ def propose_relationships(slug: str, relationships: list[Relationship], ctx: Con
         return {
             "source": _c.name, "url": _url(slug), "results": results,
             "already_proposed": out.get("relationships_skipped_existing", 0),
-            "review_url": out.get("relationship_review_url") or _c.public_base + "/ai/relationship/review",
+            "review_url": out.get("relationship_review_url") or _review_url("/ai/relationship/review"),
             "message": ("Queued for review. Nothing changes until an archivist approves it."
                         if any(r.get("queued") for r in results) else "Nothing new was queued; see each result."),
         }
@@ -643,13 +692,13 @@ def propose_description_change(
         if not text.strip():
             return {"queued": False, "message": "Nothing to propose.", "source": _c.name}
         _budget(key, 1)
-        if _c.backend == "atom-ahg":
-            out = _api("POST", f"/descriptions/{slug}/proposals", key, json={"source": "glam-mcp", "fields": [
+        if path := _queue_path(slug):
+            out = _api("POST", path, key, json={"source": "glam-mcp", "fields": [
                 {"field": field, "text": text, "evidence": evidence, "sources": sources or []}]})
             queued = bool(out.get("fields_queued"))
             return {
                 "source": _c.name, "url": _url(slug), "field": field, "queued": queued,
-                "review_url": _c.public_base + "/ai/suggest/review",
+                "review_url": _review_url("/ai/suggest/review"),
                 "message": ("Queued for review. The archivist can edit it before approving; nothing changes until then."
                             if queued else "Nothing new to queue: the same text is already waiting for review."),
             }
@@ -662,7 +711,7 @@ def propose_description_change(
 
 
 @tool()
-def propose_transcription(slug: str, text: str, digital_object_id: int | None = None, evidence: str = "",
+def propose_transcription(slug: str, text: str, digital_object_id: int | str | None = None, evidence: str = "",
                           ctx: Context | None = None) -> dict:
     """Propose a transcription of a record's file, such as a scanned page with no text.
 
@@ -681,14 +730,23 @@ def propose_transcription(slug: str, text: str, digital_object_id: int | None = 
         if not text.strip():
             return {"queued": False, "message": "Nothing to propose.", "source": _c.name}
         _budget(key, 1)
-        if _c.backend != "atom-ahg":
+        if not (path := _queue_path(slug)):
             rec = _read_record(slug, key)
             return {"source": _c.name, "url": rec["url"], "applied": False, "text": text,
                     "message": "This catalogue's API cannot store transcriptions, so nothing was saved."}
-        out = _api("POST", f"/descriptions/{slug}/proposals", key, json={"source": "glam-mcp", "transcripts": [
+        if _c.backend == "openric":
+            # Workspace publishes each page's transcript: do not propose one it already holds.
+            norm = lambda t: " ".join(t.split())
+            held = [i for i in adapters.ric_files(slug, key).get("instantiations", [])
+                    if (digital_object_id is None or i.get("id") == digital_object_id)
+                    and any(norm(t.get("value") or "") == norm(text) for t in i.get("text", []))]
+            if held:
+                return {"source": _c.name, "url": f"{_c.public_base}/record/{slug}", "queued": False,
+                        "message": "This page already has that transcript, so nothing was queued."}
+        out = _api("POST", path, key, json={"source": "glam-mcp", "transcripts": [
             {"text": text, "digital_object_id": digital_object_id, "evidence": evidence}]})
         queued = bool(out.get("fields_queued"))
-        return {"source": _c.name, "url": _url(slug), "queued": queued, "review_url": _c.public_base + "/ai/suggest/review",
+        return {"source": _c.name, "url": _url(slug), "queued": queued, "review_url": _review_url("/ai/suggest/review"),
                 "message": ("Queued for review beside the page image. Nothing changes until an archivist approves it."
                             if queued else "Nothing new to queue: the same transcription is already waiting for review.")}
     return _logged("propose_transcription", args, ctx, run)
@@ -719,15 +777,15 @@ def propose_translation(
         if not text.strip():
             return {"queued": False, "message": "Nothing to propose.", "source": _c.name}
         _budget(key, 1)
-        if _c.backend != "atom-ahg":
+        if not (path := _queue_path(slug)):
             rec = _read_record(slug, key)
             return {"source": _c.name, "url": rec["url"], "applied": False, "field": field, "language": language, "text": text,
                     "message": "Nothing was saved. Add this translation on the record's edit screen in that language."}
-        out = _api("POST", f"/descriptions/{slug}/proposals", key, json={"source": "glam-mcp", "fields": [
+        out = _api("POST", path, key, json={"source": "glam-mcp", "fields": [
             {"field": field, "culture": language.strip().lower(), "text": text, "evidence": evidence}]})
         queued = bool(out.get("fields_queued"))
         return {"source": _c.name, "url": _url(slug), "field": field, "language": language, "queued": queued,
-                "review_url": _c.public_base + "/ai/suggest/review",
+                "review_url": _review_url("/ai/suggest/review"),
                 "message": ("Queued for review. Nothing changes until an archivist approves it."
                             if queued else "Nothing new to queue: the same text is already waiting for review.")}
     return _logged("propose_translation", args, ctx, run)

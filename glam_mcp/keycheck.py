@@ -157,6 +157,9 @@ def _check(url: str, key: str, backend: str) -> str | None:
             # lists must also open through the API by its slug. A key, when given, is
             # used for both (OpenRiC Workspace keys read only what the public may).
             h = {"X-API-Key": key} if key else {}
+            # OpenRiC Workspace: a key that may list everyone's proposals belongs to a reviewer.
+            if key and c.get(url + "/api/ric/v1/proposals", params={"mine": 0, "count": 1}, headers=h).status_code == 200:
+                return "This key belongs to a reviewer (Administrator or Editor). Give a key for an account with no reviewing rights, or none."
             r = c.get(url + "/api/ric/v1/records", params={"limit": SAMPLE}, headers=h)
             if r.status_code != 200:
                 return f"The catalogue's OpenRiC API answered {r.status_code}."

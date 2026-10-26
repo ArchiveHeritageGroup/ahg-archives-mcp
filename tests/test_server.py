@@ -465,7 +465,11 @@ class NoWritePath(unittest.TestCase):
 
     def test_only_search_and_the_review_queue_are_not_reads(self):
         import ast
-        allowed = {("POST", "/search"), ("POST", "/descriptions/{slug}/proposals")}
+        # Proposals are posted to path = _queue_path(slug), which may only name a review queue.
+        import inspect
+        queues = re.findall(r'return f"([^"]+)"', inspect.getsource(server._queue_path))
+        self.assertEqual(queues, ["/descriptions/{slug}/proposals", "/records/{slug}/proposals"])
+        allowed = {("POST", "/search"), ("POST", "path")}
         found = set()
         src_dir = os.path.join(os.path.dirname(__file__), "..", "glam_mcp")
         for name in os.listdir(src_dir):
@@ -587,3 +591,70 @@ class OpenRiCWorkspace(Base):
         kids = server.get_children("01a15b79-693f-7204", catalogue="Workspace")["results"]
         self.assertEqual(kids, [{"slug": "01a15b79-6a03-73df", "title": "Panel 6", "level": "Record", "url": f"https://{WS}/record/01a15b79-6a03-73df"}])
         self.assertFalse([q for q in self.cat.seen if "/relations-for/" in q.url.path or "/hierarchy/" in q.url.path])
+
+
+U = "01a15b79-693f-7204-bcdc-ce5f43c6d6fc"
+
+
+class WorkspaceFull(Base):
+    """OpenRiC Workspace as the home catalogue (v0.8): files, text, review queue."""
+
+    def setUp(self):
+        super().setUp()
+        self.home = settings.Catalogue("WS", f"https://{WS}", f"https://{WS}/api/ric/v1", "openric", "", "X-API-Key", home=True)
+        self._home, calls.HOME, server.HOME = calls.HOME, self.home, self.home
+        settings.CATALOGUES = {"WS": self.home}
+        self._key, calls._caller_key = calls._caller_key, (lambda ctx: "staff-key")
+        self.cat.json("GET", f"{WS}/api/ric/v1/records/{U}/files", {"record": U, "title": "Panel 6", "instantiations": [
+            {"id": "i1", "title": "Photo", "files": [
+                {"id": "f1", "use": "thumbnail", "mime_type": "image/png", "path": "/discover/files/f1"},
+                {"id": "f2", "use": "reference", "mime_type": "image/png", "path": "/discover/files/f2"}],
+             "text": [{"language": "en", "value": "Two eland, one human figure."}]}]})
+
+    def tearDown(self):
+        calls.HOME, server.HOME, calls._caller_key = self._home, self._home, self._key
+        super().tearDown()
+
+    def test_text_is_the_published_transcript(self):
+        r = server.get_record_text(U)
+        self.assertEqual([(t["source"], t["digital_object_id"], t["text"], t["more"]) for t in r["results"]],
+                         [("transcript", "i1", "Two eland, one human figure.", False)])
+        self.assertEqual(server.get_record_text(U, offset=4, limit=5)["results"][0]["text"], "eland")
+
+    def test_image_is_the_reference_copy_on_its_own_host(self):
+        self.cat.routes[("GET", f"{WS}/discover/files/f2")] = httpx.Response(200, content=PNG, headers={"content-type": "image/png"})
+        out = server.get_record_image(U)
+        self.assertEqual(json.loads(out[0])["image"], f"https://{WS}/discover/files/f2")
+        self.assertFalse([q for q in self.cat.seen if q.url.path == "/discover/files/f1"])
+
+    def test_record_that_is_not_public_answers_not_found(self):
+        self.cat.routes[("GET", f"{WS}/api/ric/v1/records/{U}/files")] = httpx.Response(404, json={"title": "Not found"})
+        self.assertEqual(server.get_record_text(U)["error"], "not_found")
+
+    def test_proposals_go_to_the_review_queue_with_uuid_links(self):
+        self.cat.json("POST", f"{WS}/api/ric/v1/records/{U}/proposals", {"record": U, "queued": [{"type": "PERSON", "value": "A"}]})
+        r = server.propose_access_points_and_dates(U, [server.Proposal(kind="person", value="A", existing_id="01a1-agent", link_reason="same dates")])
+        self.assertEqual(r["review_url"], f"https://{WS}/proposals")
+        sent = json.loads(next(q for q in self.cat.seen if q.method == "POST").content)
+        self.assertEqual((sent["entities"][0]["actor_id"], self.cat.seen[-1].headers["X-API-Key"]), ("01a1-agent", "staff-key"))
+
+    def test_a_transcript_already_held_is_not_proposed_again(self):
+        r = server.propose_transcription(U, "Two  eland, one human figure.")
+        self.assertFalse(r["queued"])
+        self.assertEqual([q for q in self.cat.seen if q.method == "POST"], [])
+
+    def test_a_malformed_item_passes_the_catalogues_reason(self):
+        self.cat.json("POST", f"{WS}/api/ric/v1/records/{U}/proposals", {"title": "Bad", "detail": "Relationship 0: subject_agent_id is not an authority record"}, 400)
+        r = server.propose_relationships(U, [server.Relationship(subject="A", relation="is the spouse of", object="B")])
+        self.assertIn("subject_agent_id", r["message"])
+
+    def test_my_proposals_link_to_the_record_page(self):
+        self.cat.json("GET", f"{WS}/api/ric/v1/proposals", {"total": 1, "results": [{"kind": "field", "id": "p1", "record": U, "status": "proposed"}]})
+        self.assertEqual(server.list_my_proposals()["results"][0]["url"], f"https://{WS}/record/{U}")
+
+    def test_reference_service_still_has_no_files(self):
+        self.assertEqual(server.get_record_text("553")["error"], "unsupported")
+
+    def test_a_reviewer_key_is_refused_as_service_key(self):
+        self.cat.json("GET", f"{WS}/api/ric/v1/proposals", {"total": 0, "results": []})
+        self.assertIn("reviewer", keycheck.check(f"https://{WS}", "k", "openric"))

@@ -79,7 +79,8 @@ def _api(method: str, path: str, key: str | None = None, **kw) -> Any:
         raise NotVisible()
     # 501: the catalogue lacks what this needs (e.g. AHG API without the AI plugin's review queues).
     # 429: the key's hourly or daily limit is used up (atom-ahg-plugins#223).
-    if r.status_code in (401, 403, 429, 501):
+    # 400: the catalogue refused the request and says why (OpenRiC: one malformed item refuses all).
+    if r.status_code in (400, 401, 403, 429, 501):
         try:
             body = r.json()  # {message}, or RFC 7807 {title, detail} (OpenRiC)
             message = body.get("message") or body.get("detail") or body.get("title") or "Not authorised"
@@ -323,6 +324,21 @@ def ric_children(slug: str, key: str | None) -> tuple[dict, list[dict]]:
             kids.append({"slug": str(cid), "title": _ric_label(c.get("title") or c.get("rico:title") or c.get("label")),
                          "level": _ric_label(c.get("level") or c.get("class")), "url": c.get("@id")})
     return rec, kids
+
+
+_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def ric_workspace(slug: str) -> bool:
+    """OpenRiC Workspace names records by UUID and has files, text and a review
+    queue; the reference service names them by id or slug and has none of these."""
+    return bool(_UUID.match(str(slug)))
+
+
+def ric_files(slug: str, key: str | None) -> dict:
+    """A Workspace record's files and published text, per instantiation (v0.0.49):
+    only what a visitor may have, never masters; 404 when the record is not public."""
+    return _api("GET", f"/records/{slug}/files", key)
 
 
 def ric_agent(slug: str, key: str | None) -> dict:
