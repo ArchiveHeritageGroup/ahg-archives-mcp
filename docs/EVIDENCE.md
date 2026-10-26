@@ -13,12 +13,25 @@ Each run builds the image and runs, in it: the unit tests (fake catalogue, no ne
 | v0.5.2 | c8ed851 | 40275062629 | 40275338238 | 39 |
 | v0.6.0 | cae4599 | 40276918954 | 40277201522 | 45 |
 | v0.6.1 | 228793f | 40280263236 | 40280581094 | 45 |
+| v0.7.0 | 6b78635 | 40286950987 | 40287333136 | 52 |
 
 ## Item 20: no suggestion bypasses review
 
 1. **The MCP cannot send a write.** `tests/test_server.py::NoWritePath` reads the code and fails if any call other than `POST /search` and `POST /descriptions/{slug}/proposals` could be sent, or if a client call with a variable method appears outside the one API helper.
 2. **The catalogue's proposal endpoint writes only review queues** (ahgAPIPlugin `descriptionProposalsAction`, read 26 Oct 2026): `ahg_ner_extraction`, `ahg_ner_entity`, `ahg_ner_entity_evidence`, `ahg_relationship_proposal`, `ahg_description_suggestion`, and through Authority Resolution `ahg_mention`, `ahg_mention_context`, `ahg_mention_candidate`. It refuses a caller without edit rights on the record (`AclService::check($resource, 'update')`). Records change only when an archivist approves in the review screens.
-3. **Live check on PSIS:** `stuff/test-20-no-bypass.sh` fingerprints the record tables (CHECKSUM TABLE), sends every kind of suggestion through the signed-in service, fingerprints again. Result: pending (Dr Johan Pieterse to run).
+3. **Live check on PSIS** (run by Dr Johan Pieterse, 26 October 2026): `stuff/test-20-no-bypass.sh` fingerprinted 21 record tables (CHECKSUM TABLE), sent all five kinds of suggestion through the signed-in service with a staff key, and fingerprinted again.
+
+   | | Before | After |
+   | --- | --- | --- |
+   | Record tables (21, by checksum) | | unchanged: **PASS** |
+   | ahg_ner_extraction | 229 | 230 |
+   | ahg_ner_entity | 2169 | 2172 |
+   | ahg_ner_entity_evidence | 26 | 29 |
+   | ahg_relationship_proposal | 2 | 3 |
+   | ahg_description_suggestion | 11 | 14 |
+   | ahg_mention / ahg_mention_context | 1399 | 1401 |
+
+   Every suggestion reached its review queue (**PASS**) and no record changed. A run repeating the same text queued nothing, as duplicates are refused; the script now uses new text each run.
 
 ## Item 1: stock AtoM visibility
 
@@ -46,10 +59,17 @@ Since v0.6.0 no field on stock AtoM comes from its REST API: every value is read
 
 - `pip-audit`: the only findings were in the base image's pip (12 known issues); pip is upgraded in the image, and the scan of everything the service runs reports no known vulnerabilities. CI runs the scan on every push (failing on findings) and keeps a CycloneDX SBOM with the run. `SECURITY.md` describes reporting.
 
+## Daily cap (plugins #223)
+
+`stuff/test-223-daily-cap.sh` on PSIS, 26 October 2026: a throwaway read-only key with a daily cap of 3 answered 200, 200, 200, then 429 with Retry-After 51172 (seconds to midnight).
+
+## First hosted client
+
+Heratio (26 October 2026): service key checked (reads only what a visitor sees); leak test against heratio.org through the hosted public service, 17 hidden records, 73 checks, all passed; published at https://heratio.mcp.theahg.co.za, checked from outside (health ok, search returns heratio.org records, signed-in address refuses callers without a key).
+
 ## Pending
 
 - Item 5: sign-in through a real browser (`tests/SIGNIN_TEST.md`).
-- Item 20, live part: `stuff/test-20-no-bypass.sh` was run on PSIS on 26 Oct 2026; result to be recorded here.
 - OpenRiC and Workspace leak tests: need read access to their databases.
 - Item 7: independent security assessment.
 - Item 25: pilot with a partner institution.
