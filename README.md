@@ -178,7 +178,7 @@ The signed-in service serves a staff page at `/usage`: calls per day, per tool, 
 
 ## Tests
 
-`tests/test_server.py` and `tests/test_auth.py` (68 tests) run against a fake catalogue, with no network: every read tool's answers and refusals (401, 403, 404, 429, 501, 500), catalogue choice and keys, image fetching (own host only, no redirects, image types only, size limit), demo catalogues answering from a non-public address, stock AtoM reading only from the public page (nothing that only the API returns comes through), the OpenRiC adapter, same-host redirects in the key check, that no call besides search and the review queue can be sent, the health states, the data folder rule, the hourly proposal limit, the key check, log contents, and sign-in (hashed tokens, encrypted keys, single-use codes, rotation, revocation, a key revoked at the catalogue). CI runs them on every push:
+`tests/test_server.py` and `tests/test_auth.py` (69 tests) run against a fake catalogue, with no network: every read tool's answers and refusals (401, 403, 404, 429, 501, 500), catalogue choice and keys, image fetching (own host only, no redirects, image types only, size limit), demo catalogues answering from a non-public address, stock AtoM reading only from the public page (nothing that only the API returns comes through), the OpenRiC adapter, same-host redirects in the key check, that no call besides search and the review queue can be sent, the health states, the data folder rule, the hourly proposal limit, the key check, log contents, and sign-in (hashed tokens, encrypted keys, single-use codes, rotation, revocation, a key revoked at the catalogue). CI runs them on every push:
 
     docker run --rm -v "$PWD/tests:/app/tests:ro" ahg/glam-mcp:phase2 python -m unittest discover -s tests -p 'test_*.py'
 
@@ -193,6 +193,7 @@ The signed-in service serves a staff page at `/usage`: calls per day, per tool, 
 
 ## Versions
 
+- **v0.8.2** (26 Oct 2026): stock AtoM children and children_count come from the visitor's treeview (direct children, paged, drafts left out) instead of the REST API tree, which returns the whole subtree; a large fonds no longer times out or ties up the catalogue. 69 unit tests.
 - **v0.8.1** (26 Oct 2026): from an outside tester's retest on stock AtoM: get_children answers a draft and a missing slug alike (visibility checked before the API); records carry part_of from the visitor's breadcrumb and children_count of visible children. 68 unit tests.
 - **v0.8.0** (26 Oct 2026): OpenRiC Workspace as a full backend: file text and images, proposals into its review queue, my proposals, relations as RiC types, UUID links; a reviewer's key is refused as service key; a catalogue's reason for refusing a request is passed on. Key check waits out rate limiting; OpenRiC needs no service key. 64 unit tests.
 - **v0.7.1** (26 Oct 2026): one User-Agent on every request, `AHG-GLAM-MCP/0.7`, with a prefix that stays the same for fail2ban and bot rules; the health check covers every hosted client; the leak test runs against OpenRiC (Workspace passed).
