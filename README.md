@@ -1,6 +1,6 @@
 # AHG Archives MCP server
 
-An MCP server for AtoM and Heratio catalogues. It lets an assistant work with a catalogue the way an archivist would: find records, read them with their children, images, text and provenance, and propose improvements. Nothing it proposes changes a record until an archivist reviews and approves it.
+An MCP server for AtoM catalogues, stock AtoM and AtoM with the AHG Extensions (Heratio is planned). It lets an assistant work with a catalogue the way an archivist would: find records, read them with their children, images, text and provenance, and propose improvements. Nothing it proposes changes a record until an archivist reviews and approves it.
 
 In development. See it in action on AtoM: [AtoM MCP Server in Action](https://youtu.be/n6snV-lgH_Y).
 
@@ -37,6 +37,17 @@ Every read tool takes an optional `catalogue` (a name from `list_catalogues`); e
 
 What a caller sees follows AtoM's own permissions: unpublished records, hidden children and master files stay hidden from callers who could not see them in AtoM. `tests/no_leak.py` checks this against a live catalogue.
 
+## Security
+
+- **Reads go through the catalogue's API only**, never its database, and follow its own permissions. A caller with no key of their own reads with the service key, so that key must read no more than a visitor does: the server checks it at start-up (`glam_mcp/keycheck.py`) and refuses to start with a staff key or one that reads records a visitor cannot open. The check samples the newest records; `tests/no_leak.py` with database access is the full test.
+- **Nothing is written to a record by the assistant.** Proposals go to the catalogue's review queues; an archivist approves each one. A caller's own key is used only with the home catalogue and is never sent to another.
+- **Images** are fetched only from the catalogue's own host and port (a file link must be a plain path), without following redirects, image types only, read in pieces and stopped at 3 MB. A demo catalogue's host must also be a public address.
+- **Stock AtoM** returns every field through its API, including ones the site hides from visitors, so only fields the record's public page shows are passed on.
+- **Limits:** each catalogue key has its own hourly limit, and may have a daily cap and an end date (set in the catalogue); each signed-in person may queue at most `GLAM_PROPOSAL_CAP` proposal items an hour, kept on disk.
+- **Logs** keep the tool, catalogue and outcome, but free text (search words, names, proposed text) only as its length and a short hash; owner-only files, deleted after `GLAM_LOG_DAYS` (90). Sign-in tokens are stored as hashes and catalogue keys encrypted.
+
+An independent source review (26 October 2026) shaped v0.5.0. Still open from it: a full test of sign-in through a real browser, and the stock AtoM field filter is by text match on the public page, so staff with their own key also see visitor fields only on stock AtoM.
+
 ## Backends
 
 The server finds out which of these a catalogue has when it starts (`GLAM_BACKEND=auto`), so the same install serves both.
@@ -51,7 +62,7 @@ The server finds out which of these a catalogue has when it starts (`GLAM_BACKEN
 2. Create a user with **no groups** for the public service and generate its REST API key (edit the user). Signed-in archivists use their own keys.
 3. Set `CATALOGUE_URL`, `CATALOGUE_API_KEY` and `CATALOGUE_NAME`; `GLAM_BACKEND=auto` finds the stock API.
 
-AtoM 2.10.2's REST API checks only the "read" permission, not "view draft", so any key can read draft records through it. The server therefore treats a record on stock AtoM as visible only when a visitor can open its public page, which applies the catalogue's own rules; anything else is "not found". Keep the API key away from anything but this server.
+AtoM 2.10.2's REST API checks only the "read" permission, not "view draft", so any key can read draft records through it, and it returns fields the site hides from visitors. The server therefore treats a record on stock AtoM as visible only when a visitor can open its public page, which applies the catalogue's own rules (anything else is "not found"), and passes on only the fields that page shows. Keep the API key away from anything but this server.
 
 ## Install for your own catalogue
 
@@ -69,7 +80,7 @@ The server runs beside your catalogue, on your own address, and talks to it only
    ```
 
    Generate `MCP_SECRET` with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
-4. Start it: either pull the ready-made image (`docker pull ghcr.io/archiveheritagegroup/ahg-archives-mcp:latest`, and set `image:` in `docker-compose.yml` to it) or build your own (`docker build -t ahg/glam-mcp:phase2 .`); then `docker compose up -d` and check `curl 127.0.0.1:8031/healthz`.
+4. Start it: either pull the ready-made image (`docker pull ghcr.io/archiveheritagegroup/ahg-archives-mcp:latest`, and set `image:` in `docker-compose.yml` to it) or build your own (`docker build -t ahg/glam-mcp:phase2 .`); then `docker compose up -d` and check `curl 127.0.0.1:8031/healthz`. If the service key reads more than a visitor, the services refuse to start and say why (`docker compose logs`).
 5. Check the service user's key reads only what a visitor sees: `docker run --rm ghcr.io/archiveheritagegroup/ahg-archives-mcp python -m glam_mcp.keycheck https://catalogue.example.org <key>`.
 6. Put the two endpoints behind HTTPS on your own name. `docs/nginx-mcp.theahg.co.za.conf` is a working example to copy and rename.
 7. Run `tests/no_leak.py` against your catalogue before opening it to anyone.
@@ -88,7 +99,7 @@ A required setting that is missing stops the server at start with its name, rath
 | `MCP_SECRET` | With `oauth` | Fernet key that encrypts stored catalogue keys. |
 | `MCP_SIGNED_IN_URL` | No | Where the public endpoint tells people to sign in to propose changes. |
 | `GLAM_HTTP_PATH` | No | Endpoint path, e.g. `/mcp` or `/public/mcp`. |
-| `GLAM_DATA` | No | Where sign-in tokens are kept (hashed, keys encrypted). |
+| `GLAM_DATA` | No | Folder for the sign-in store (tokens hashed, keys encrypted), the hourly proposal limit and demo catalogues. Mount it on both services. |
 | `GLAM_CALL_LOG` | No | Optional JSON-lines log of tool calls: tool, catalogue, outcome, and for free text (search words, names, proposed text) only its length and a short hash. Readable by the service's user only, one file a day. |
 | `GLAM_LOG_DAYS` | No | Days of call logs kept before deletion (default 90). |
 | `GLAM_PROPOSAL_CAP` | No | Proposal items one signed-in person may queue per hour (default 200). |
@@ -148,6 +159,11 @@ The signed-in service serves a staff page at `/usage`: calls per day, per tool, 
     GLAM_MCP_URL=http://127.0.0.1:8000/mcp CATALOGUE_DB_CNF=db.cnf CATALOGUE_DB=atom PUBLIC_CONTROL_SLUG=published-letter python tests/no_leak.py
 
 `docker compose -p stock-atom down -v` removes the test catalogue.
+
+## Versions
+
+- **v0.5.0** (26 Oct 2026): security and reliability release after an independent source review. Image fetching bound to the catalogue's own host; service-key check at start-up; stock AtoM fields only as the public page shows them; logs without free text, rotated and deleted after 90 days; hourly proposal limit kept on disk; unit tests (fake catalogue) in CI.
+- **v0.4.0** (26 Oct 2026): several catalogues (`list_catalogues`, `catalogue` on every read tool, search across all), demo catalogues page, staff usage page, hosted clients (`hosting/client.sh`), ready-made image, key check.
 
 ## Licence
 

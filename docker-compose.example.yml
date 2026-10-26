@@ -8,6 +8,7 @@
 #   mcp-public  read-only, no sign-in     -> https://mcp.example.org/public/mcp
 #   mcp         OAuth sign-in or staff key -> https://mcp.example.org/mcp
 x-common: &common
+  # Ready-made: ghcr.io/archiveheritagegroup/ahg-archives-mcp:0.5.0 (pin a version), or build your own:
   build: .
   image: ahg/glam-mcp:phase2
   restart: unless-stopped
@@ -17,9 +18,8 @@ x-common: &common
     - ./data:/data
 
 x-catalogue: &catalogue
-  GLAM_BACKEND: atom-ahg                          # atom-ahg (AHG Extensions) or atom-base (stock AtoM)
+  GLAM_BACKEND: auto                              # auto (asks the catalogue), atom-ahg or atom-base
   CATALOGUE_URL: https://catalogue.example.org    # your catalogue's public address
-  CATALOGUE_API_URL: https://catalogue.example.org/api/v2   # /api for atom-base
   CATALOGUE_NAME: "Example Archive catalogue"     # how answers name the catalogue
   CATALOGUE_API_KEY: ${CATALOGUE_API_KEY}
 
@@ -33,6 +33,7 @@ services:
       GLAM_AUTH: "off"
       GLAM_HTTP_PATH: /public/mcp
       GLAM_CALL_LOG: /logs/calls-public.jsonl
+      GLAM_DATA: /data
       MCP_SIGNED_IN_URL: https://mcp.example.org/mcp
 
   mcp:
@@ -44,6 +45,7 @@ services:
       GLAM_AUTH: oauth
       GLAM_HTTP_PATH: /mcp
       GLAM_CALL_LOG: /logs/calls.jsonl
+      GLAM_USAGE_LOGS: /logs/calls.jsonl,/logs/calls-public.jsonl   # staff page /usage
       GLAM_DATA: /data
       MCP_PUBLIC_URL: https://mcp.example.org
       GLAM_SECRET: ${MCP_SECRET}
