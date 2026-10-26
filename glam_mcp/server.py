@@ -52,6 +52,8 @@ import os
 import threading
 import time
 from collections import defaultdict, deque
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any, Literal
 
 import httpx
@@ -158,6 +160,9 @@ mcp = FastMCP(
         "call propose_transcription, and for text in another language propose_translation; for text fields call "
         "propose_description_change. Give evidence and source URLs for everything, especially facts "
         "found on the web. Proposals are reviewed by an archivist; never describe them as saved."
+        + (" Other catalogues can be searched and read too (list_catalogues; search_records with catalogue=\"all\"): "
+           "read each result with the catalogue it came from, and never propose changes to a record from another catalogue, "
+           "since proposals go to the home catalogue only." if AUTH_MODE == "oauth" or os.environ.get("GLAM_OTHER_CATALOGUES", "[]").strip() not in ("", "[]") else "")
     ),
     host=os.environ.get("GLAM_HOST", "0.0.0.0"),
     port=int(os.environ.get("GLAM_PORT", "8000")),
@@ -175,6 +180,61 @@ if _provider is not None:
 USER_AGENT = "AHG-GLAM-MCP/0.2 (+https://www.atom-extensions.com)"
 KEY_HEADER = "X-API-Key" if BACKEND == "atom-ahg" else "REST-API-Key"
 _client = httpx.Client(timeout=20.0, headers={"Accept": "application/json", "User-Agent": USER_AGENT})
+
+
+@dataclass(frozen=True)
+class Catalogue:
+    name: str
+    public_base: str
+    api_base: str
+    backend: str
+    key: str
+    key_header: str
+    home: bool = False
+    demo: bool = False
+
+
+def _other_catalogues() -> dict[str, Catalogue]:
+    """GLAM_OTHER_CATALOGUES: further catalogues to read and search, as a JSON list
+    of {"name", "url", "key", "backend"?}. They are read with their own service
+    key (give it a user with no groups, so only what a visitor sees comes back)
+    and never receive proposals or a caller's key; those stay with the home
+    catalogue. One that cannot be reached at start-up is left out, not fatal."""
+    out: dict[str, Catalogue] = {}
+    for c in json.loads(os.environ.get("GLAM_OTHER_CATALOGUES") or "[]"):
+        base = c["url"].rstrip("/")
+        try:
+            backend = c.get("backend") or _detect_backend(base, c.get("key", ""))
+        except SystemExit as e:
+            log.warning(json.dumps({"catalogue": c["name"], "skipped": str(e)}))
+            continue
+        out[c["name"]] = Catalogue(c["name"], base, base + ("/api/v2" if backend == "atom-ahg" else "/api"), backend,
+                                   c.get("key", ""), "X-API-Key" if backend == "atom-ahg" else "REST-API-Key")
+    return out
+
+
+HOME = Catalogue(SOURCE, PUBLIC_BASE, API_BASE, BACKEND, API_KEY, KEY_HEADER, home=True)
+CATALOGUES = {HOME.name: HOME, **_other_catalogues()}
+
+
+def _catalogues() -> dict[str, Catalogue]:
+    """Home, configured, then demo catalogues added at /catalogues (read each call, so both services see them)."""
+    from glam_mcp import catalogues as demo
+    out = dict(CATALOGUES)
+    for d in demo.load():
+        out.setdefault(d["name"], Catalogue(d["name"], d["url"], d["url"] + ("/api/v2" if d["backend"] == "atom-ahg" else "/api"),
+                                            d["backend"], d.get("key", ""), "X-API-Key" if d["backend"] == "atom-ahg" else "REST-API-Key", demo=True))
+    return out
+_current: ContextVar[Catalogue] = ContextVar("catalogue", default=HOME)
+
+
+class _Current:
+    """The catalogue this tool call reads (the home one unless the caller chose another)."""
+    def __getattr__(self, name):
+        return getattr(_current.get(), name)
+
+
+_c = _Current()
 
 
 class NotVisible(Exception):
@@ -198,14 +258,19 @@ def _caller_key(ctx: Context | None) -> str | None:
     of our OAuth tokens (mapped to the key the user gave at sign-in) or a
     catalogue key sent directly by a desktop client.
     """
-    if _provider is None:
+    if _provider is None or not _c.home:
         return None
     from mcp.server.auth.middleware.auth_context import get_access_token
     return _provider.catalogue_key_for(get_access_token())
 
 
+def _read_key(ctx: Context | None, catalogue: str) -> str | None:
+    """The caller's key for reads in the home catalogue; other catalogues are read with their own service key."""
+    return _caller_key(ctx) if catalogue in ("", HOME.name) else None
+
+
 def _api(method: str, path: str, key: str | None = None, **kw) -> Any:
-    r = _client.request(method, API_BASE + path, headers={KEY_HEADER: key or API_KEY}, **kw)
+    r = _client.request(method, _c.api_base + path, headers={_c.key_header: key or _c.key}, **kw)
     if r.status_code == 404:
         raise NotVisible()
     # 501: the catalogue lacks what this needs (e.g. AHG API without the AI plugin's review queues).
@@ -221,9 +286,18 @@ def _api(method: str, path: str, key: str | None = None, **kw) -> Any:
     return body.get("data", body) if isinstance(body, dict) and "data" in body else body
 
 
+def _unknown_catalogue(name: str) -> dict:
+    return {"found": False, "message": f"No catalogue called {name!r} here. Catalogues: " + ", ".join(_catalogues()) + ".", "source": HOME.name}
+
+
 def _logged(tool: str, args: dict, ctx: Context | None, fn):
     start = time.time()
     outcome, count = "ok", None
+    name = args.get("catalogue") or HOME.name
+    cats = _catalogues()
+    if name not in cats:
+        return _unknown_catalogue(name)
+    token = _current.set(cats[name])
     try:
         result = fn()
         if isinstance(result, dict) and isinstance(result.get("results"), list):
@@ -231,31 +305,33 @@ def _logged(tool: str, args: dict, ctx: Context | None, fn):
         return result
     except NotVisible:
         outcome = "not_found"
-        return {"found": False, "message": "No visible record with that reference.", "source": SOURCE}
+        return {"found": False, "message": "No visible record with that reference.", "source": _c.name}
     except NeedsCallerKey:
         outcome = "needs_key"
-        return {"found": False, "message": "Proposing changes needs you to be signed in. Connect to " + (SIGNED_IN_URL or "this catalogue's signed-in MCP address") + " and sign in with your catalogue API key; the public read-only address cannot propose.", "source": SOURCE}
+        return {"found": False, "message": "Proposing changes needs you to be signed in. Connect to " + (SIGNED_IN_URL or "this catalogue's signed-in MCP address") + " and sign in with your catalogue API key; the public read-only address cannot propose.", "source": _c.name}
     except Refused as e:
         outcome = "refused"
-        return {"found": False, "message": e.message, "source": SOURCE}
+        return {"found": False, "message": e.message, "source": _c.name}
     except Exception as e:  # never show the caller internals
         outcome = "error:" + type(e).__name__
-        return {"found": False, "message": "The catalogue could not be reached. Try again later.", "source": SOURCE}
+        return {"found": False, "message": "The catalogue could not be reached. Try again later.", "source": _c.name}
     finally:
         log.info(json.dumps({
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "tool": tool, "args": args, "caller": "own-key" if (ck := _caller_key(ctx)) else "public",
             # Tells one person's calls from another's for usage figures; reveals nothing of the key.
             **({"key": hashlib.sha256(ck.encode()).hexdigest()[:8]} if ck else {}),
+            **({} if _c.home else {"catalogue": _c.name}),
             "outcome": outcome, "results": count, "ms": int((time.time() - start) * 1000),
         }))
+        _current.reset(token)
 
 
 def _url(slug: str) -> str:
-    return f"{PUBLIC_BASE}/{slug}"
+    return f"{_c.public_base}/{slug}"
 
 
 def _file_url(path: str | None) -> str | None:
-    return f"{PUBLIC_BASE}{path}" if path else None
+    return f"{_c.public_base}{path}" if path else None
 
 
 def _limit(n: int) -> int:
@@ -269,17 +345,22 @@ def _hit(slug: str, title: Any, level: Any) -> dict:
 # ── Reads ───────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def search_records(query: str, limit: int = 10, skip: int = 0, ctx: Context | None = None) -> dict:
+def search_records(query: str, limit: int = 10, skip: int = 0, catalogue: str = "", ctx: Context | None = None) -> dict:
     """Search archival descriptions (fonds, series, files, items) by keyword.
 
     Returns title, level of description and the citable URL of each match.
-    Use get_record on a result for the full description.
+    Use get_record on a result for the full description. catalogue: leave empty
+    for the home catalogue, give a name from list_catalogues, or "all" to search
+    every catalogue at once (results grouped by catalogue). Every read tool takes
+    the same catalogue; read a result with the catalogue it came from.
     """
-    key = _caller_key(ctx)
+    if catalogue == "all":
+        return {"catalogues": [search_records(query, limit, skip, name, ctx) for name in _catalogues()]}
+    key = _read_key(ctx, catalogue)
 
     def run():
         n, s = _limit(limit), max(0, int(skip))
-        if BACKEND == "atom-ahg":
+        if _c.backend == "atom-ahg":
             data = _api("POST", "/search", key, json={"query": query, "limit": n, "skip": s})
             hits = [_hit(h["slug"], h.get("title"), h.get("level_of_description")) for h in data.get("results", []) if h.get("slug")]
         else:
@@ -288,14 +369,23 @@ def search_records(query: str, limit: int = 10, skip: int = 0, ctx: Context | No
                     if h.get("slug") and _visitor_sees(h["slug"])]
             # The total counts records a visitor cannot see; report what is shown.
             data = {"total": s + len(hits) if len(hits) < n else data.get("total")}
-        return {"source": SOURCE, "total": data.get("total", len(hits)), "results": hits}
-    return _logged("search_records", {"query": query, "limit": limit, "skip": skip}, ctx, run)
+        return {"source": _c.name, "total": data.get("total", len(hits)), "results": hits}
+    return _logged("search_records", {"query": query, "limit": limit, "skip": skip, "catalogue": catalogue}, ctx, run)
+
+
+@mcp.tool()
+def list_catalogues() -> dict:
+    """The catalogues this service can search and read. Proposals go to the home catalogue only."""
+    return {"catalogues": [{"name": c.name, "url": c.public_base, "home": c.home,
+                            "kind": "AtoM with AHG extensions" if c.backend == "atom-ahg" else "AtoM",
+                            "proposals": c.home and AUTH_MODE == "oauth", **({"demo": True} if c.demo else {})}
+                           for c in _catalogues().values()]}
 
 
 def _read_ahg(slug: str, key: str | None) -> dict:
     d = _api("GET", f"/descriptions/{slug}", key, params={"full": "true"})
     return {
-        "found": True, "source": SOURCE, "url": _url(slug), "slug": slug,
+        "found": True, "source": _c.name, "url": _url(slug), "slug": slug,
         "title": d.get("title"), "reference_code": d.get("identifier"), "level": d.get("level_of_description"),
         "dates": d.get("dates"), "extent": d.get("extent_and_medium"), "scope_and_content": d.get("scope_and_content"),
         "archival_history": d.get("archival_history"), "names": d.get("names"), "subjects": d.get("subjects"),
@@ -305,13 +395,13 @@ def _read_ahg(slug: str, key: str | None) -> dict:
         "provenance": d.get("provenance"),
         "images": [
             {"thumbnail": _file_url(o.get("thumbnail_url")), "reference": _file_url(o.get("reference_url")),
-             "iiif_manifest": f"{PUBLIC_BASE}/iiif/manifest/{slug}"}
+             "iiif_manifest": f"{_c.public_base}/iiif/manifest/{slug}"}
             for o in d.get("digital_objects", []) if o.get("reference_url") or o.get("thumbnail_url")
         ],
     }
 
 
-_visible_cache: dict[str, tuple[float, bool]] = {}
+_visible_cache: dict[tuple[str, str], tuple[float, bool]] = {}
 
 
 def _visitor_sees(slug: str) -> bool:
@@ -321,16 +411,16 @@ def _visitor_sees(slug: str) -> bool:
     language, so a record counts as visible only when a visitor gets it.
     Anything but 200 is hidden. Remembered for five minutes."""
     now = time.time()
-    hit = _visible_cache.get(slug)
+    hit = _visible_cache.get((_c.public_base, slug))
     if hit and hit[0] > now - 300:
         return hit[1]
     try:
-        ok = _client.get(f"{PUBLIC_BASE}/{slug}", headers={"Accept": "text/html"}, follow_redirects=False).status_code == 200
+        ok = _client.get(f"{_c.public_base}/{slug}", headers={"Accept": "text/html"}, follow_redirects=False).status_code == 200
     except httpx.HTTPError:
         ok = False
     if len(_visible_cache) > 5000:
         _visible_cache.clear()
-    _visible_cache[slug] = (now, ok)
+    _visible_cache[(_c.public_base, slug)] = (now, ok)
     return ok
 
 
@@ -349,7 +439,7 @@ def _read_base(slug: str, key: str | None) -> dict:
         raise NotVisible()
     d = _api("GET", f"/informationobjects/{slug}", key)
     return {
-        "found": True, "source": SOURCE, "url": _url(slug), "slug": slug,
+        "found": True, "source": _c.name, "url": _url(slug), "slug": slug,
         "title": d.get("title"), "reference_code": d.get("reference_code"), "level": d.get("level_of_description"),
         "dates": d.get("dates"), "extent": d.get("extent_and_medium"), "scope_and_content": d.get("scope_and_content"),
         "archival_history": d.get("archival_history"), "names": _names_base(d),
@@ -359,36 +449,36 @@ def _read_base(slug: str, key: str | None) -> dict:
 
 
 @mcp.tool()
-def get_record(slug: str, ctx: Context | None = None) -> dict:
+def get_record(slug: str, catalogue: str = "", ctx: Context | None = None) -> dict:
     """Read one archival description in full, by its slug (the last part of its URL).
 
     Includes dates, names, subjects, places, notes and, where the catalogue
     provides them, its place in the hierarchy, its number of children, images,
     and its provenance chain (owners, dates, transfers, certainty, gaps).
     """
-    key = _caller_key(ctx)
-    return _logged("get_record", {"slug": slug}, ctx, lambda: (_read_ahg if BACKEND == "atom-ahg" else _read_base)(slug, key))
+    key = _read_key(ctx, catalogue)
+    return _logged("get_record", {"slug": slug, "catalogue": catalogue}, ctx, lambda: (_read_ahg if _c.backend == "atom-ahg" else _read_base)(slug, key))
 
 
 @mcp.tool()
-def get_children(slug: str, limit: int = 25, skip: int = 0, ctx: Context | None = None) -> dict:
+def get_children(slug: str, limit: int = 25, skip: int = 0, catalogue: str = "", ctx: Context | None = None) -> dict:
     """List the descriptions directly below one record (for example the series in a fonds)."""
-    key = _caller_key(ctx)
+    key = _read_key(ctx, catalogue)
 
     def run():
-        if BACKEND == "atom-ahg":
+        if _c.backend == "atom-ahg":
             parent = _api("GET", f"/descriptions/{slug}", key)
             data = _api("GET", "/descriptions", key, params={"parent": parent["id"], "limit": _limit(limit), "skip": max(0, int(skip))})
             kids = [_hit(c["slug"], c.get("title"), c.get("level_of_description")) for c in data.get("results", []) if c.get("slug")]
-            return {"source": SOURCE, "parent": {"title": parent.get("title"), "url": _url(slug)}, "total": data.get("total", 0), "results": kids}
+            return {"source": _c.name, "parent": {"title": parent.get("title"), "url": _url(slug)}, "total": data.get("total", 0), "results": kids}
         tree = _api("GET", f"/informationobjects/tree/{slug}", key)
         if not _visitor_sees(slug):
             raise NotVisible()
         kids = [_hit(c["slug"], c.get("title"), c.get("level")) for c in (tree.get("children") or [])
                 if c.get("slug") and _visitor_sees(c["slug"])]
         start = max(0, int(skip))
-        return {"source": SOURCE, "parent": {"title": tree.get("title"), "url": _url(slug)}, "total": len(kids), "results": kids[start:start + _limit(limit)]}
-    return _logged("get_children", {"slug": slug, "limit": limit, "skip": skip}, ctx, run)
+        return {"source": _c.name, "parent": {"title": tree.get("title"), "url": _url(slug)}, "total": len(kids), "results": kids[start:start + _limit(limit)]}
+    return _logged("get_children", {"slug": slug, "limit": limit, "skip": skip, "catalogue": catalogue}, ctx, run)
 
 
 @mcp.tool()
@@ -408,13 +498,13 @@ def work_through_series(slug: str, limit: int = 10, skip: int = 0, ctx: Context 
 
     def run():
         n, s = _limit(limit), max(0, int(skip))
-        if BACKEND != "atom-ahg":
+        if _c.backend != "atom-ahg":
             # Stock AtoM keeps no proposals: the batch is the children alone.
             kids = get_children(slug, n, s, ctx)
             if "results" not in kids:
                 return kids
             total = kids["total"]
-            return {"source": SOURCE, "parent": kids["parent"], "total_children": total,
+            return {"source": _c.name, "parent": kids["parent"], "total_children": total,
                     "batch": [{**k, "my_proposals": {}} for k in kids["results"]], "batch_proposals_by_status": {},
                     "proposals_left_this_hour": _budget(key) if key else 0, "next_skip": s + n if s + n < total else None}
         parent = _api("GET", f"/descriptions/{slug}", key)
@@ -433,7 +523,7 @@ def work_through_series(slug: str, limit: int = 10, skip: int = 0, ctx: Context 
             for st, k in b["my_proposals"].items():
                 totals[st] += k
         return {
-            "source": SOURCE, "parent": {"title": parent.get("title"), "url": _url(slug)}, "total_children": total,
+            "source": _c.name, "parent": {"title": parent.get("title"), "url": _url(slug)}, "total_children": total,
             "batch": batch, "batch_proposals_by_status": dict(totals),
             "proposals_left_this_hour": _budget(key) if key else 0,
             "next_skip": s + n if s + n < total else None,
@@ -443,20 +533,20 @@ def work_through_series(slug: str, limit: int = 10, skip: int = 0, ctx: Context 
 
 
 @mcp.tool()
-def get_authority(slug: str, ctx: Context | None = None) -> dict:
+def get_authority(slug: str, catalogue: str = "", ctx: Context | None = None) -> dict:
     """Read an authority record (a person, family or organisation) by its slug."""
-    key = _caller_key(ctx)
+    key = _read_key(ctx, catalogue)
 
     def run():
-        if BACKEND != "atom-ahg":
-            return {"found": False, "message": "This catalogue's API does not publish authority records.", "source": SOURCE}
+        if _c.backend != "atom-ahg":
+            return {"found": False, "message": "This catalogue's API does not publish authority records.", "source": _c.name}
         a = _api("GET", f"/authorities/{slug}", key)
         return {
-            "found": True, "source": SOURCE, "url": _url(slug), "name": a.get("authorized_form_of_name"),
+            "found": True, "source": _c.name, "url": _url(slug), "name": a.get("authorized_form_of_name"),
             "entity_type": a.get("entity_type"), "dates_of_existence": a.get("dates_of_existence"),
             "history": a.get("history"), "places": a.get("places"), "functions": a.get("functions"),
         }
-    return _logged("get_authority", {"slug": slug}, ctx, run)
+    return _logged("get_authority", {"slug": slug, "catalogue": catalogue}, ctx, run)
 
 
 PLACES_TAXONOMY_ID = 42
@@ -465,7 +555,7 @@ AUTHORITY_KINDS = {"person": "person", "organisation": "organization", "family":
 
 @mcp.tool()
 def search_authorities(name: str, kind: Literal["person", "organisation", "family", "place"] = "person",
-                       limit: int = 10, ctx: Context | None = None) -> dict:
+                       limit: int = 10, catalogue: str = "", ctx: Context | None = None) -> dict:
     """Find existing authority records (people, organisations, families) or places by name.
 
     Every word must appear in the name, in any order, so "Hendrik Engelbrecht"
@@ -474,43 +564,43 @@ def search_authorities(name: str, kind: Literal["person", "organisation", "famil
     id as existing_id in propose_access_points_and_dates, so the archivist links
     the existing record instead of creating a new one.
     """
-    key = _caller_key(ctx)
+    key = _read_key(ctx, catalogue)
 
     def run():
-        if BACKEND != "atom-ahg":
-            return {"found": False, "message": "This catalogue's API cannot search authority records.", "source": SOURCE}
+        if _c.backend != "atom-ahg":
+            return {"found": False, "message": "This catalogue's API cannot search authority records.", "source": _c.name}
         n = _limit(limit)
         if kind == "place":
             terms = _api("GET", f"/taxonomies/{PLACES_TAXONOMY_ID}/terms", key, params={"search": name}).get("terms", [])
             hits = [{"id": t["id"], "name": t.get("name"), "kind": "place"} for t in terms[:n]]
-            return {"source": SOURCE, "total": len(terms), "results": hits}
+            return {"source": _c.name, "total": len(terms), "results": hits}
         data = _api("GET", "/authorities", key, params={"search": name, "entity_type": AUTHORITY_KINDS[kind], "limit": n})
         hits = [{"id": a["id"], "name": a.get("authorized_form_of_name"), "kind": kind, "slug": a.get("slug"),
                  "url": _url(a["slug"]) if a.get("slug") else None} for a in data.get("results", [])]
-        return {"source": SOURCE, "total": data.get("total", len(hits)), "results": hits}
-    return _logged("search_authorities", {"name": name, "kind": kind, "limit": limit}, ctx, run)
+        return {"source": _c.name, "total": data.get("total", len(hits)), "results": hits}
+    return _logged("search_authorities", {"name": name, "kind": kind, "limit": limit, "catalogue": catalogue}, ctx, run)
 
 
 @mcp.tool()
-def get_iiif_manifest(slug: str, ctx: Context | None = None) -> dict:
+def get_iiif_manifest(slug: str, catalogue: str = "", ctx: Context | None = None) -> dict:
     """Return the IIIF manifest URL for a record's images, for viewing in a IIIF viewer."""
-    key = _caller_key(ctx)
+    key = _read_key(ctx, catalogue)
 
     def run():
-        if BACKEND != "atom-ahg":
-            return {"found": False, "message": "This catalogue does not publish IIIF manifests.", "source": SOURCE}
+        if _c.backend != "atom-ahg":
+            return {"found": False, "message": "This catalogue does not publish IIIF manifests.", "source": _c.name}
         # Visibility is decided by the API first; the manifest is only offered for
         # records this key may read.
         rec = _read_ahg(slug, key)
         if not rec["images"]:
-            return {"found": False, "message": "This record has no viewable images.", "source": SOURCE, "url": _url(slug)}
-        manifest = f"{PUBLIC_BASE}/iiif/manifest/{slug}"
-        return {"found": True, "source": SOURCE, "url": _url(slug), "title": rec["title"], "iiif_manifest": manifest}
-    return _logged("get_iiif_manifest", {"slug": slug}, ctx, run)
+            return {"found": False, "message": "This record has no viewable images.", "source": _c.name, "url": _url(slug)}
+        manifest = f"{_c.public_base}/iiif/manifest/{slug}"
+        return {"found": True, "source": _c.name, "url": _url(slug), "title": rec["title"], "iiif_manifest": manifest}
+    return _logged("get_iiif_manifest", {"slug": slug, "catalogue": catalogue}, ctx, run)
 
 
 @mcp.tool()
-def get_record_text(slug: str, offset: int = 0, limit: int = 20000, ctx: Context | None = None) -> dict:
+def get_record_text(slug: str, offset: int = 0, limit: int = 20000, catalogue: str = "", ctx: Context | None = None) -> dict:
     """Read the text held for a record's files: text extracted from a PDF or by OCR,
     and transcriptions of audio or video.
 
@@ -519,18 +609,18 @@ def get_record_text(slug: str, offset: int = 0, limit: int = 20000, ctx: Context
     offset set to offset + the length you received. Personal information may be
     masked. Quote what you rely on when you propose changes.
     """
-    key = _caller_key(ctx)
-    args = {"slug": slug, "offset": offset, "limit": limit}
+    key = _read_key(ctx, catalogue)
+    args = {"slug": slug, "offset": offset, "limit": limit, "catalogue": catalogue}
 
     def run():
-        if BACKEND != "atom-ahg":
-            return {"found": False, "message": "This catalogue's API does not publish file text.", "source": SOURCE}
+        if _c.backend != "atom-ahg":
+            return {"found": False, "message": "This catalogue's API does not publish file text.", "source": _c.name}
         d = _api("GET", f"/descriptions/{slug}/text", key, params={"start": max(0, int(offset)), "chars": max(1, min(int(limit), 50000))})
         texts = d.get("texts", [])
         if not texts:
-            return {"found": True, "source": SOURCE, "url": _url(slug), "results": [],
+            return {"found": True, "source": _c.name, "url": _url(slug), "results": [],
                     "message": d.get("note") or "No text is held for this record's files. For an image, use get_record_image."}
-        return {"found": True, "source": SOURCE, "url": _url(slug), "results": texts}
+        return {"found": True, "source": _c.name, "url": _url(slug), "results": texts}
     return _logged("get_record_text", args, ctx, run)
 
 
@@ -538,7 +628,7 @@ MAX_IMAGE_BYTES = 3_000_000
 
 
 @mcp.tool()
-def get_record_image(slug: str, ctx: Context | None = None) -> list:
+def get_record_image(slug: str, catalogue: str = "", ctx: Context | None = None) -> list:
     """Look at a record's image: returns the reference image itself, so you can
     describe what it shows, read inscriptions or labels, or judge its condition.
 
@@ -547,11 +637,15 @@ def get_record_image(slug: str, ctx: Context | None = None) -> list:
     master). Say what you saw and what you inferred, and treat inscriptions you
     cannot read clearly as uncertain.
     """
-    key = _caller_key(ctx)
+    key = _read_key(ctx, catalogue)
     start = time.time()
     outcome, out = "ok", None
+    cats = _catalogues()
+    if (catalogue or HOME.name) not in cats:
+        return [_unknown_catalogue(catalogue)["message"]]
+    token = _current.set(cats[catalogue or HOME.name])
     try:
-        if BACKEND != "atom-ahg":
+        if _c.backend != "atom-ahg":
             outcome = "unsupported"
             return ["This catalogue's API does not publish record images."]
         rec = _read_ahg(slug, key)  # the API decides whether this caller may see the record and its files
@@ -566,7 +660,7 @@ def get_record_image(slug: str, ctx: Context | None = None) -> list:
             return [f"The image for {rec['title']} is too large to show here; open it at {ref}"]
         fmt = (r.headers.get("content-type", "image/jpeg").split("/")[-1].split(";")[0] or "jpeg").replace("jpg", "jpeg")
         out = len(r.content)
-        return [json.dumps({"source": SOURCE, "url": rec["url"], "title": rec["title"], "image": ref}), Image(data=r.content, format=fmt)]
+        return [json.dumps({"source": _c.name, "url": rec["url"], "title": rec["title"], "image": ref}), Image(data=r.content, format=fmt)]
     except NotVisible:
         outcome = "not_found"
         return ["No visible record with that reference."]
@@ -574,9 +668,10 @@ def get_record_image(slug: str, ctx: Context | None = None) -> list:
         outcome = "error:" + type(e).__name__
         return ["The image could not be fetched. Try again later."]
     finally:
-        log.info(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "tool": "get_record_image", "args": {"slug": slug},
+        log.info(json.dumps({"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "tool": "get_record_image", "args": {"slug": slug, "catalogue": catalogue},
                              "caller": "own-key" if key else "public", "outcome": outcome, "bytes": out,
                              "ms": int((time.time() - start) * 1000)}))
+        _current.reset(token)
 
 
 # ── Proposals ───────────────────────────────────────────────────────────────
@@ -636,11 +731,11 @@ def list_my_proposals(status: Literal["pending", "approved", "edited", "linked",
 
     def run():
         key = _needs_key(ctx)
-        if BACKEND != "atom-ahg":
-            return {"found": False, "message": "This catalogue keeps no proposals: they are returned for the archivist to apply.", "source": SOURCE}
+        if _c.backend != "atom-ahg":
+            return {"found": False, "message": "This catalogue keeps no proposals: they are returned for the archivist to apply.", "source": _c.name}
         data = _api("GET", "/proposals", key, params={"mine": 1, "count": _limit(limit), "start": max(0, int(skip)), **({"status": status} if status else {})})
         results = [{**r, "url": _url(r["slug"]) if r.get("slug") else None} for r in data.get("results", [])]
-        return {"source": SOURCE, "total": data.get("total", len(results)), "results": results}
+        return {"source": _c.name, "total": data.get("total", len(results)), "results": results}
     return _logged("list_my_proposals", args, ctx, run)
 
 
@@ -708,9 +803,9 @@ def propose_access_points_and_dates(slug: str, proposals: list[Proposal], ctx: C
         key = _needs_key(ctx)
         items = [p for p in proposals if p.value.strip()]
         if not items:
-            return {"queued": [], "message": "Nothing to propose.", "source": SOURCE}
+            return {"queued": [], "message": "Nothing to propose.", "source": _c.name}
         _budget(key, len(items))
-        if BACKEND == "atom-ahg":
+        if _c.backend == "atom-ahg":
             out = _api("POST", f"/descriptions/{slug}/proposals", key, json={"source": "glam-mcp", "entities": [
                 {"type": ENTITY_TYPES[p.kind], "value": p.value.strip(), "evidence": p.evidence, "sources": p.sources,
                  **({"authority": a} if (a := {k: v.strip() for k, v in (("dates_of_existence", p.dates_of_existence), ("history", p.history), ("places", p.places)) if v.strip()})
@@ -718,15 +813,15 @@ def propose_access_points_and_dates(slug: str, proposals: list[Proposal], ctx: C
                  **({("term_id" if p.kind == "place" else "actor_id"): p.existing_id, "link_reason": p.link_reason}
                     if p.existing_id and p.kind != "date" else {})} for p in items]})
             return {
-                "source": SOURCE, "url": _url(slug), "queued": out.get("queued", []),
+                "source": _c.name, "url": _url(slug), "queued": out.get("queued", []),
                 "already_proposed_or_linked": out.get("skipped_existing", 0),
-                "review_url": PUBLIC_BASE + "/ai/ner/review",
+                "review_url": _c.public_base + "/ai/ner/review",
                 "message": ("Queued for review. Nothing on the record changes until an archivist approves it."
                             if out.get("queued") else "Nothing new to queue: these were already proposed or linked for this record."),
             }
         rec = _read_base(slug, key)  # the record exists and a visitor may see it
         return {
-            "source": SOURCE, "url": _url(slug), "applied": False, "proposals": [p.model_dump() for p in items],
+            "source": _c.name, "url": _url(slug), "applied": False, "proposals": [p.model_dump() for p in items],
             **_import_csv(slug, rec, items, key),
         }
     return _logged("propose_access_points_and_dates", args, ctx, run)
@@ -772,9 +867,9 @@ def propose_relationships(slug: str, relationships: list[Relationship], ctx: Con
     def run():
         key = _needs_key(ctx)
         _budget(key, len(relationships))
-        if BACKEND != "atom-ahg":
+        if _c.backend != "atom-ahg":
             _read_base(slug, key)
-            return {"source": SOURCE, "url": _url(slug), "applied": False, "proposals": [r.model_dump() for r in relationships],
+            return {"source": _c.name, "url": _url(slug), "applied": False, "proposals": [r.model_dump() for r in relationships],
                     "message": "This catalogue's API cannot add relationships, so nothing was saved. Add them on the authority records' edit screens."}
         out = _api("POST", f"/descriptions/{slug}/proposals", key, json={"source": "glam-mcp", "relationships": [
             {"subject_name": r.subject.strip(), "subject_actor_id": r.subject_existing_id, "relation": r.relation,
@@ -783,9 +878,9 @@ def propose_relationships(slug: str, relationships: list[Relationship], ctx: Con
             for r in relationships]})
         results = out.get("relationships", [])
         return {
-            "source": SOURCE, "url": _url(slug), "results": results,
+            "source": _c.name, "url": _url(slug), "results": results,
             "already_proposed": out.get("relationships_skipped_existing", 0),
-            "review_url": out.get("relationship_review_url") or PUBLIC_BASE + "/ai/relationship/review",
+            "review_url": out.get("relationship_review_url") or _c.public_base + "/ai/relationship/review",
             "message": ("Queued for review. Nothing changes until an archivist approves it."
                         if any(r.get("queued") for r in results) else "Nothing new was queued; see each result."),
         }
@@ -817,21 +912,21 @@ def propose_description_change(
     def run():
         key = _needs_key(ctx)
         if not text.strip():
-            return {"queued": False, "message": "Nothing to propose.", "source": SOURCE}
+            return {"queued": False, "message": "Nothing to propose.", "source": _c.name}
         _budget(key, 1)
-        if BACKEND == "atom-ahg":
+        if _c.backend == "atom-ahg":
             out = _api("POST", f"/descriptions/{slug}/proposals", key, json={"source": "glam-mcp", "fields": [
                 {"field": field, "text": text, "evidence": evidence, "sources": sources or []}]})
             queued = bool(out.get("fields_queued"))
             return {
-                "source": SOURCE, "url": _url(slug), "field": field, "queued": queued,
-                "review_url": PUBLIC_BASE + "/ai/suggest/review",
+                "source": _c.name, "url": _url(slug), "field": field, "queued": queued,
+                "review_url": _c.public_base + "/ai/suggest/review",
                 "message": ("Queued for review. The archivist can edit it before approving; nothing changes until then."
                             if queued else "Nothing new to queue: the same text is already waiting for review."),
             }
         _read_base(slug, key)
         return {
-            "source": SOURCE, "url": _url(slug), "applied": False, "field": field, "text": text, "evidence": evidence, "sources": sources or [],
+            "source": _c.name, "url": _url(slug), "applied": False, "field": field, "text": text, "evidence": evidence, "sources": sources or [],
             "message": "Nothing was saved. Apply this on the record's edit screen.",
         }
     return _logged("propose_description_change", args, ctx, run)
@@ -855,16 +950,16 @@ def propose_transcription(slug: str, text: str, digital_object_id: int | None = 
     def run():
         key = _needs_key(ctx)
         if not text.strip():
-            return {"queued": False, "message": "Nothing to propose.", "source": SOURCE}
+            return {"queued": False, "message": "Nothing to propose.", "source": _c.name}
         _budget(key, 1)
-        if BACKEND != "atom-ahg":
+        if _c.backend != "atom-ahg":
             _read_base(slug, key)
-            return {"source": SOURCE, "url": _url(slug), "applied": False, "text": text,
+            return {"source": _c.name, "url": _url(slug), "applied": False, "text": text,
                     "message": "This catalogue's API cannot store transcriptions, so nothing was saved."}
         out = _api("POST", f"/descriptions/{slug}/proposals", key, json={"source": "glam-mcp", "transcripts": [
             {"text": text, "digital_object_id": digital_object_id, "evidence": evidence}]})
         queued = bool(out.get("fields_queued"))
-        return {"source": SOURCE, "url": _url(slug), "queued": queued, "review_url": PUBLIC_BASE + "/ai/suggest/review",
+        return {"source": _c.name, "url": _url(slug), "queued": queued, "review_url": _c.public_base + "/ai/suggest/review",
                 "message": ("Queued for review beside the page image. Nothing changes until an archivist approves it."
                             if queued else "Nothing new to queue: the same transcription is already waiting for review.")}
     return _logged("propose_transcription", args, ctx, run)
@@ -893,17 +988,17 @@ def propose_translation(
     def run():
         key = _needs_key(ctx)
         if not text.strip():
-            return {"queued": False, "message": "Nothing to propose.", "source": SOURCE}
+            return {"queued": False, "message": "Nothing to propose.", "source": _c.name}
         _budget(key, 1)
-        if BACKEND != "atom-ahg":
+        if _c.backend != "atom-ahg":
             _read_base(slug, key)
-            return {"source": SOURCE, "url": _url(slug), "applied": False, "field": field, "language": language, "text": text,
+            return {"source": _c.name, "url": _url(slug), "applied": False, "field": field, "language": language, "text": text,
                     "message": "Nothing was saved. Add this translation on the record's edit screen in that language."}
         out = _api("POST", f"/descriptions/{slug}/proposals", key, json={"source": "glam-mcp", "fields": [
             {"field": field, "culture": language.strip().lower(), "text": text, "evidence": evidence}]})
         queued = bool(out.get("fields_queued"))
-        return {"source": SOURCE, "url": _url(slug), "field": field, "language": language, "queued": queued,
-                "review_url": PUBLIC_BASE + "/ai/suggest/review",
+        return {"source": _c.name, "url": _url(slug), "field": field, "language": language, "queued": queued,
+                "review_url": _c.public_base + "/ai/suggest/review",
                 "message": ("Queued for review. Nothing changes until an archivist approves it."
                             if queued else "Nothing new to queue: the same text is already waiting for review.")}
     return _logged("propose_translation", args, ctx, run)
@@ -912,22 +1007,25 @@ def propose_translation(
 @mcp.custom_route("/healthz", methods=["GET"])
 async def healthz(request: Request) -> JSONResponse:
     try:
-        r = _client.get(API_BASE + ("" if BACKEND == "atom-ahg" else "/informationobjects?limit=1"), headers={KEY_HEADER: API_KEY})
+        r = _client.get(_c.api_base + ("" if _c.backend == "atom-ahg" else "/informationobjects?limit=1"), headers={_c.key_header: _c.key})
         ok = r.status_code < 500
     except Exception:
         ok = False
-    return JSONResponse({"status": "ok" if ok else "degraded", "backend": BACKEND, "auth": AUTH_MODE, "source": SOURCE, "api": ok}, status_code=200 if ok else 503)
+    return JSONResponse({"status": "ok" if ok else "degraded", "backend": _c.backend, "auth": AUTH_MODE, "source": _c.name, "api": ok}, status_code=200 if ok else 503)
 
 
 if AUTH_MODE == "oauth":
     # Staff usage figures (#10), on the signed-in service only; it reads both services' logs.
     from glam_mcp.usage import make_usage_route
     _logs = [p for p in os.environ.get("GLAM_USAGE_LOGS", CALL_LOG).split(",") if p]
-    mcp.custom_route("/usage", methods=["GET", "POST"])(make_usage_route(API_BASE, KEY_HEADER, USER_AGENT, SOURCE, _logs))
+    mcp.custom_route("/usage", methods=["GET", "POST"])(make_usage_route(_c.api_base, _c.key_header, USER_AGENT, _c.name, _logs))
+    from glam_mcp.catalogues import make_catalogues_route
+    mcp.custom_route("/catalogues", methods=["GET", "POST"])(make_catalogues_route(
+        HOME.api_base, HOME.key_header, USER_AGENT, HOME.name, lambda: set(CATALOGUES), _detect_backend))
 
 
 def main() -> None:
-    if not API_KEY:
+    if not _c.key:
         raise SystemExit("PSIS_API_KEY is not set")
     mcp.run(transport="streamable-http")
 

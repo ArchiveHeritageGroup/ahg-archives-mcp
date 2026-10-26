@@ -16,7 +16,8 @@ The quick-start guide (`docs/AHG_Archives_MCP_Quick_Start.md`) covers connecting
 
 | Tool | What it does |
 | --- | --- |
-| `search_records` | Search descriptions by text, optionally under one parent. |
+| `list_catalogues` | The catalogues this service can read: the home one, and any others or demo catalogues. |
+| `search_records` | Search descriptions by text, optionally under one parent. `catalogue="all"` searches every catalogue at once. |
 | `get_record` | One description in full: dates, creators, access points, hierarchy, children, images and the provenance chain. |
 | `get_children` | The records directly below a description. |
 | `work_through_series` | Walk every record below a parent (each page of a family Bible), a batch at a time, with your proposals on each so far and how many you may still make this hour. |
@@ -31,6 +32,8 @@ The quick-start guide (`docs/AHG_Archives_MCP_Quick_Start.md`) covers connecting
 | `propose_description_change` | Propose new text for one field of a description (title, scope and content, archival history and others). |
 | `propose_transcription` | Propose a transcription of a record's file (a scanned page with no text), reviewed beside the page image; once approved it is the file's text and searchable. |
 | `propose_translation` | Propose a translation of a field into another language (e.g. Dutch or Afrikaans into English). |
+
+Every read tool takes an optional `catalogue` (a name from `list_catalogues`); empty means the home catalogue. Proposals always go to the home catalogue.
 
 What a caller sees follows AtoM's own permissions: unpublished records, hidden children and master files stay hidden from callers who could not see them in AtoM. `tests/no_leak.py` checks this against a live catalogue.
 
@@ -92,6 +95,18 @@ A required setting that is missing stops the server at start with its name, rath
 The older names (`PSIS_PUBLIC_BASE`, `PSIS_API_BASE`, `PSIS_API_KEY`, `GLAM_SOURCE_LABEL`, `GLAM_PUBLIC_BASE`, `GLAM_SECRET`) are still accepted.
 
 `docs/AHG_Archives_MCP_Quick_Start.md` is the guide for archivists using AHG's hosted service: connecting, checking it works, asking good questions and reviewing proposals.
+
+## Several catalogues
+
+One service can read more than one catalogue. The home catalogue (`CATALOGUE_URL`) gets proposals and signed-in users' keys. Others are read only, each with its own service key (make it for a user with no groups, so only what a visitor sees comes back), and never receive a caller's key or a proposal:
+
+    GLAM_OTHER_CATALOGUES='[{"name": "Heratio", "url": "https://heratio.example.org", "key": "..."}]'
+
+A catalogue that cannot be reached at start-up is left out with a warning. Each entry may set `"backend"` instead of having it detected.
+
+**Demo catalogues.** For a show and tell, catalogue administrators and editors can add a client's catalogue on the signed-in service's `/catalogues` page: a name, its address and a read-only key from it. Agents then find it in `list_catalogues` and read it with `catalogue="<name>"`. It lapses after `GLAM_DEMO_DAYS` (7) days. Addresses inside the host's own network are refused. Both services read the list from `<GLAM_DATA>/demo-catalogues.json`, so they share it without a restart.
+
+To run the no-leak test through a second catalogue, set `TEST_CATALOGUE` to its name.
 
 ## Usage figures
 

@@ -89,8 +89,12 @@ def sql(q: str) -> list[list[str]]:
     return [line.split("\t") for line in out.splitlines() if line]
 
 
+# Set to test a catalogue the service reads besides its home one (GLAM_OTHER_CATALOGUES).
+CATALOGUE = os.environ.get("TEST_CATALOGUE", "")
+
+
 async def call(s: ClientSession, tool: str, **args) -> dict:
-    r = await s.call_tool(tool, args)
+    r = await s.call_tool(tool, {**args, "catalogue": CATALOGUE} if CATALOGUE else args)
     return json.loads(r.content[0].text) if r.content else {}
 
 
