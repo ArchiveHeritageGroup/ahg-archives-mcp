@@ -266,15 +266,12 @@ def get_children(slug: str, limit: int = 25, skip: int = 0, catalogue: str = "",
             start = max(0, int(skip))
             return {"source": _c.name, "parent": {"title": rec["title"], "url": rec["url"]}, "total": len(kids),
                     "results": kids[start:start + _limit(limit)]}
-        # Visibility first: the API answers a draft differently from a missing
-        # record, so asking it first would tell anyone which slugs are drafts.
-        if not _visitor_sees(slug):
-            raise NotVisible()
-        tree = _api("GET", f"/informationobjects/tree/{slug}", key)
-        kids = [_hit(c["slug"], c.get("title"), c.get("level")) for c in (tree.get("children") or [])
-                if c.get("slug") and _visitor_sees(c["slug"])]
-        start = max(0, int(skip))
-        return {"source": _c.name, "parent": {"title": tree.get("title"), "url": _url(slug)}, "total": len(kids), "results": kids[start:start + _limit(limit)]}
+        # Visibility first, from the visitor's own page and treeview, never the API:
+        # the API answers a draft differently from a missing record.
+        parent = adapters._read_base(slug, key)
+        page, total = adapters.tree_page(slug, max(0, int(skip)), _limit(limit))
+        kids = [_hit(c["slug"], c["title"], c["level"]) for c in page if _visitor_sees(c["slug"])]
+        return {"source": _c.name, "parent": {"title": parent["title"], "url": _url(slug)}, "total": total, "results": kids}
     return _logged("get_children", {"slug": slug, "limit": limit, "skip": skip, "catalogue": catalogue}, ctx, run)
 
 

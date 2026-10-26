@@ -275,16 +275,39 @@ def _ancestors(sections: dict[str, str]) -> list[dict]:
     return out
 
 
-def _visible_children(slug: str, key: str | None, cap: int = 50) -> int | None:
-    """Stock AtoM: how many records directly below this one a visitor may open.
-    The API lists them (drafts too), so each is checked against its public page.
-    ponytail: None above cap children, rather than one page fetch each; raise the
-    cap or count from search if large fonds need a number."""
+def tree_page(slug: str, skip: int, limit: int) -> tuple[list[dict], int]:
+    """Stock AtoM: one page of the records directly below this one, as a visitor's
+    treeview gets them (fullWidthTreeView): direct children only, paged, drafts
+    left out for anyone not signed in, and the parent's own read check applied.
+    Not the REST API's tree, which returns the whole subtree in one answer
+    (12,091 records for one fonds took over a minute) and includes drafts.
+    Returns (children, how many a visitor may see)."""
+    r = _client.get(f"{_c.public_base}/{slug}/informationobject/fullWidthTreeView",
+                    params={"nodeLimit": max(1, limit), "skip": max(0, skip)},
+                    headers={"Accept": "application/json"}, follow_redirects=False)
+    if r.status_code != 200 or _off_network(r):
+        raise NotVisible()
     try:
-        kids = [c["slug"] for c in (_api("GET", f"/informationobjects/tree/{slug}", key).get("children") or []) if c.get("slug")]
+        d = r.json()
+    except ValueError:
+        raise NotARecordPage()  # e.g. a bot check answering instead of AtoM
+    kids = []
+    for n in d.get("nodes") or []:
+        a = n.get("a_attr") or {}
+        kid = str(a.get("href", "")).rstrip("/").rsplit("/", 1)[-1]
+        if kid:
+            # AtoM labels each node "[Level] Title".
+            kids.append({"slug": kid, "title": re.sub(r"^\[[^\]]*\]\s*", "", html.unescape(a.get("title") or n.get("text") or "")),
+                         "level": n.get("type")})
+    return kids, int(d.get("total") or len(kids))
+
+
+def _visible_children(slug: str, key: str | None) -> int | None:
+    """Stock AtoM: how many records directly below this one a visitor may see."""
+    try:
+        return tree_page(slug, 0, 1)[1]
     except Exception:
         return None
-    return sum(1 for k in kids if _visitor_sees(k)) if len(kids) <= cap else None
 
 
 # ── OpenRiC (RiC-O JSON-LD at /api/ric/v1, read only) ───────────────────────

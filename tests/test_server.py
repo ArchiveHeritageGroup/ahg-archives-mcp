@@ -214,8 +214,7 @@ class StockFields(Base):
         self.assertNotIn("Secret farm", r["places"])
         self.assertIsNone(r["notes"])  # the text is on the page, but not under a note heading
         self.assertNotIn("Draft", json.dumps(r))
-        # The API is asked only for the list of children, each then checked against its page.
-        self.assertEqual({q.url.path for q in self.cat.seen if "/api/" in q.url.path}, {"/api/informationobjects/tree/rec"})
+        self.assertFalse([q for q in self.cat.seen if "/api/" in q.url.path])  # the API is not even asked
 
     def test_parents_from_the_breadcrumb_and_visible_children_counted(self):
         crumbs = ('<ol class="breadcrumb"><li class="breadcrumb-item"><a href="/index.php/fonds" title="F">The fonds</a></li>'
@@ -224,13 +223,13 @@ class StockFields(Base):
         self.cat.routes[("GET", "stock.example.org/rec")] = httpx.Response(200, text=STOCK_PAGE.replace("<h1>", crumbs + "<h1>", 1))
         self.cat.routes[("GET", "stock.example.org/fonds")] = httpx.Response(200, text=STOCK_PAGE)
         self.cat.routes[("GET", "stock.example.org/hidden-series")] = httpx.Response(302, headers={"location": "/user/login"})
-        self.cat.json("GET", "stock.example.org/api/informationobjects/tree/rec", {"children": [{"slug": "kid"}, {"slug": "draft-kid"}]})
-        self.cat.routes[("GET", "stock.example.org/kid")] = httpx.Response(200, text=STOCK_PAGE)
-        self.cat.routes[("GET", "stock.example.org/draft-kid")] = httpx.Response(302, headers={"location": "/user/login"})
+        # The visitor's treeview: direct children only, drafts already left out by AtoM.
+        self.cat.json("GET", "stock.example.org/rec/informationobject/fullWidthTreeView", {"nodes": [
+            {"id": "9", "text": "[Item] Kid", "type": "Item", "a_attr": {"title": "[Item] Kid", "href": "/index.php/kid"}}], "total": 4})
         catalogue._visible_cache.clear()
         r = catalogue._read_base("rec", None)
         self.assertEqual(r["part_of"], [{"title": "The fonds", "url": "https://stock.example.org/fonds"}])
-        self.assertEqual(r["children_count"], 1)
+        self.assertEqual(r["children_count"], 4)
 
     def test_get_children_answers_a_draft_as_a_missing_record(self):
         # The API refuses a draft (401) but fails differently on a missing slug; neither may show.
@@ -241,7 +240,19 @@ class StockFields(Base):
         draft = server.get_children("draft", catalogue="Stock")
         missing = server.get_children("no-such-slug", catalogue="Stock")
         self.assertEqual((draft["error"], missing["error"]), ("not_found", "not_found"))
-        self.assertFalse([q for q in self.cat.seen if "/tree/" in q.url.path])
+        self.assertFalse([q for q in self.cat.seen if "/tree/" in q.url.path or "TreeView" in q.url.path])
+
+    def test_get_children_pages_the_visitors_treeview(self):
+        settings.CATALOGUES = {"Home": settings.HOME, "Stock": self.stock}
+        self.cat.json("GET", "stock.example.org/rec/informationobject/fullWidthTreeView", {"nodes": [
+            {"id": "9", "text": "[Series] Missions", "type": "Series", "a_attr": {"title": "[Series] Missions", "href": "/index.php/missions"}}], "total": 4})
+        self.cat.routes[("GET", "stock.example.org/missions")] = httpx.Response(200, text=STOCK_PAGE)
+        catalogue._visible_cache.clear()
+        r = server.get_children("rec", limit=1, skip=1, catalogue="Stock")
+        self.assertEqual((r["total"], r["results"][0]["title"], r["results"][0]["level"]), (4, "Missions", "Series"))
+        q = [q for q in self.cat.seen if "TreeView" in q.url.path][-1]  # the first is the parent's own count
+        self.assertEqual((q.url.params["nodeLimit"], q.url.params["skip"]), ("1", "1"))
+        self.assertFalse([q for q in self.cat.seen if "/api/" in q.url.path])
 
     def test_a_bot_check_page_is_neither_a_record_nor_visible(self):
         # Seen on a live site (26 Oct 2026): 200 with a script that sends the browser to /challenge.
