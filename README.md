@@ -174,7 +174,7 @@ The signed-in service serves a staff page at `/usage`: calls per day, per tool, 
 
 ## Versions
 
-- **Next:** `server.py` split into the MCP layer, catalogue adapters, per-call policy and settings (no change in behaviour); sign-in test through a real browser (`tests/SIGNIN_TEST.md`, `tests/signin_check.py`).
+- **v0.5.1** (26 Oct 2026): `server.py` split into the MCP layer, catalogue adapters, per-call policy and settings (no change in behaviour); sign-in test through a real browser (`tests/SIGNIN_TEST.md`, `tests/signin_check.py`).
 - **v0.5.0** (26 Oct 2026): security and reliability release after an independent source review. Image fetching bound to the catalogue's own host; service-key check at start-up; stock AtoM fields only as the public page shows them; logs without free text, rotated and deleted after 90 days; hourly proposal limit kept on disk; unit tests (fake catalogue) in CI.
 - **v0.4.0** (26 Oct 2026): several catalogues (`list_catalogues`, `catalogue` on every read tool, search across all), demo catalogues page, staff usage page, hosted clients (`hosting/client.sh`), ready-made image, key check.
 
