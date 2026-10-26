@@ -3,7 +3,7 @@
   "name": "za.co.theahg/ahg-archives",
   "title": "AHG Archives",
   "description": "Search and read AtoM archival catalogues with citable links; staff propose changes for review.",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "websiteUrl": "https://www.atom-extensions.com",
   "repository": {
     "url": "https://github.com/ArchiveHeritageGroup/ahg-archives-mcp",

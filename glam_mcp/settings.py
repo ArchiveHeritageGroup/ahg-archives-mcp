@@ -29,7 +29,7 @@ import os
 from contextvars import ContextVar
 from dataclasses import dataclass
 
-from glam_mcp.keycheck import check as keycheck, detect_backend as _detect_backend
+from glam_mcp.keycheck import BACKENDS, check as keycheck, detect_backend as _detect_backend
 
 
 def _setting(name: str, old: str = "", default: str | None = None) -> str:
@@ -47,7 +47,7 @@ API_KEY = _setting("CATALOGUE_API_KEY", "PSIS_API_KEY", "")
 BACKEND = os.environ.get("GLAM_BACKEND", "auto")
 if BACKEND == "auto":
     BACKEND = _detect_backend(PUBLIC_BASE, API_KEY)
-API_BASE = _setting("CATALOGUE_API_URL", "PSIS_API_BASE", PUBLIC_BASE + ("/api/v2" if BACKEND == "atom-ahg" else "/api")).rstrip("/")
+API_BASE = _setting("CATALOGUE_API_URL", "PSIS_API_BASE", PUBLIC_BASE + BACKENDS.get(BACKEND, ("",))[0]).rstrip("/")
 SOURCE = _setting("CATALOGUE_NAME", "GLAM_SOURCE_LABEL")
 CALL_LOG = os.environ.get("GLAM_CALL_LOG", "")  # file path; empty means stdout
 MAX_LIMIT = 25
@@ -58,8 +58,8 @@ MAX_LIMIT = 25
 PROPOSAL_CAP = int(os.environ.get("GLAM_PROPOSAL_CAP", "200"))
 ENTITY_TYPES = {"person": "PERSON", "organisation": "ORG", "place": "GPE", "date": "DATE"}
 
-if BACKEND not in ("atom-ahg", "atom-base"):
-    raise SystemExit(f"GLAM_BACKEND must be auto, atom-ahg or atom-base, not {BACKEND!r}")
+if BACKEND not in BACKENDS:
+    raise SystemExit(f"GLAM_BACKEND must be auto or one of {', '.join(BACKENDS)}, not {BACKEND!r}")
 
 # Files this service writes (logs, sign-in store, limits) are for its own user only.
 os.umask(0o077)
@@ -89,7 +89,7 @@ SIGNED_IN_URL = _setting("MCP_SIGNED_IN_URL", default=(MCP_BASE + HTTP_PATH) if 
 # PSIS's nginx drops requests from generic client user agents (bot protection),
 # so the service names itself.
 USER_AGENT = "AHG-GLAM-MCP/0.2 (+https://www.atom-extensions.com)"
-KEY_HEADER = "X-API-Key" if BACKEND == "atom-ahg" else "REST-API-Key"
+KEY_HEADER = BACKENDS[BACKEND][1]
 
 
 @dataclass(frozen=True)
@@ -121,8 +121,7 @@ def _other_catalogues() -> dict[str, Catalogue]:
         if why := keycheck(base, c.get("key", ""), backend):
             log.warning(json.dumps({"catalogue": c["name"], "skipped": why}))
             continue
-        out[c["name"]] = Catalogue(c["name"], base, base + ("/api/v2" if backend == "atom-ahg" else "/api"), backend,
-                                   c.get("key", ""), "X-API-Key" if backend == "atom-ahg" else "REST-API-Key")
+        out[c["name"]] = Catalogue(c["name"], base, base + BACKENDS[backend][0], backend, c.get("key", ""), BACKENDS[backend][1])
     return out
 
 
@@ -135,8 +134,8 @@ def _catalogues() -> dict[str, Catalogue]:
     from glam_mcp import catalogues as demo
     out = dict(CATALOGUES)
     for d in demo.load():
-        out.setdefault(d["name"], Catalogue(d["name"], d["url"], d["url"] + ("/api/v2" if d["backend"] == "atom-ahg" else "/api"),
-                                            d["backend"], d.get("key", ""), "X-API-Key" if d["backend"] == "atom-ahg" else "REST-API-Key", demo=True))
+        out.setdefault(d["name"], Catalogue(d["name"], d["url"], d["url"] + BACKENDS[d["backend"]][0],
+                                            d["backend"], d.get("key", ""), BACKENDS[d["backend"]][1], demo=True))
     return out
 _current: ContextVar[Catalogue] = ContextVar("catalogue", default=HOME)
 

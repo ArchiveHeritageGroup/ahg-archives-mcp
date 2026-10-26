@@ -67,7 +67,7 @@ def make_catalogues_route(api_base: str, key_header: str, user_agent: str, sourc
     detect(url, key): "atom-ahg" or "atom-base", raising SystemExit when neither answers."""
 
     def _list(message: str = "", error: bool = False) -> str:
-        rows = [[r["name"], r["url"], "AtoM with AHG extensions" if r["backend"] == "atom-ahg" else "AtoM",
+        rows = [[r["name"], r["url"], keycheck.BACKENDS[r["backend"]][3],
                  time.strftime("%d %b %Y", time.localtime(r["added"] + DEMO_DAYS * 86400))] for r in load()]
         note = f'<p class="{"err" if error else ""}">{html.escape(message)}</p>' if message else ""
         return f"""<p>Add a client's catalogue for a show and tell. Agents connected to this service then see it in

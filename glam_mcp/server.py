@@ -77,7 +77,7 @@ from glam_mcp.catalogue import (
     ImageRefused,
     NotVisible,
 )
-from glam_mcp.keycheck import check as keycheck, detect_backend as _detect_backend
+from glam_mcp.keycheck import BACKENDS, check as keycheck, detect_backend as _detect_backend
 from glam_mcp.settings import (
     _c,
     _catalogues,
@@ -109,9 +109,9 @@ if AUTH_MODE == "oauth":
     if not _secret:
         raise SystemExit("GLAM_AUTH=oauth needs MCP_SECRET (a Fernet key)")
     _store = Store(os.path.join(os.environ.get("GLAM_DATA", "/data"), "oauth.db"), _secret)
-    _checker = CatalogueKeyChecker(API_BASE, "X-API-Key" if BACKEND == "atom-ahg" else "REST-API-Key",
+    _checker = CatalogueKeyChecker(API_BASE, BACKENDS[BACKEND][1],
                                    "AHG-GLAM-MCP/0.3 (+https://www.atom-extensions.com)",
-                                   "/descriptions?limit=1" if BACKEND == "atom-ahg" else "/informationobjects?limit=1")
+                                   BACKENDS[BACKEND][2])
     _provider = CatalogueKeyOAuthProvider(_store, _checker, MCP_BASE, SOURCE, PUBLIC_BASE + "/api/keys")
     _auth_kwargs = {
         "auth_server_provider": _provider,
@@ -185,6 +185,16 @@ def search_records(query: str, limit: int = 10, skip: int = 0, catalogue: str = 
         if _c.backend == "atom-ahg":
             data = _api("POST", "/search", key, json={"query": query, "limit": n, "skip": s})
             hits = [_hit(h["slug"], h.get("title"), h.get("level_of_description")) for h in data.get("results", []) if h.get("slug")]
+        elif _c.backend == "openric":
+            # Title search only; each hit is read for its citable page.
+            hits = []
+            for h in adapters.ric_search(query, n, s):
+                try:
+                    r = adapters._read_openric(str(h["id"]), key)
+                except NotVisible:
+                    continue
+                hits.append({"slug": str(h["id"]), "title": r["title"] or h.get("label"), "level": r["level"], "url": r["url"]})
+            data = {"total": s + len(hits) if len(hits) < n else None}
         else:
             data = _api("GET", "/informationobjects", key, params={"sq0": query, "limit": n, "skip": s})
             hits = [_hit(h["slug"], h.get("title"), h.get("level_of_description")) for h in data.get("results", [])
@@ -199,9 +209,14 @@ def search_records(query: str, limit: int = 10, skip: int = 0, catalogue: str = 
 def list_catalogues() -> dict:
     """The catalogues this service can search and read. Proposals go to the home catalogue only."""
     return {"catalogues": [{"name": c.name, "url": c.public_base, "home": c.home,
-                            "kind": "AtoM with AHG extensions" if c.backend == "atom-ahg" else "AtoM",
+                            "kind": BACKENDS[c.backend][3],
                             "proposals": c.home and AUTH_MODE == "oauth", **({"demo": True} if c.demo else {})}
                            for c in _catalogues().values()]}
+
+
+def _read_record(slug: str, key: str | None) -> dict:
+    """The record, read the way the current catalogue's backend reads it."""
+    return {"atom-ahg": _read_ahg, "atom-base": _read_base, "openric": adapters._read_openric}[_c.backend](slug, key)
 
 
 @mcp.tool()
@@ -213,7 +228,7 @@ def get_record(slug: str, catalogue: str = "", ctx: Context | None = None) -> di
     and its provenance chain (owners, dates, transfers, certainty, gaps).
     """
     key = _read_key(ctx, catalogue)
-    return _logged("get_record", {"slug": slug, "catalogue": catalogue}, ctx, lambda: (_read_ahg if _c.backend == "atom-ahg" else _read_base)(slug, key))
+    return _logged("get_record", {"slug": slug, "catalogue": catalogue}, ctx, lambda: _read_record(slug, key))
 
 
 @mcp.tool()
@@ -227,6 +242,11 @@ def get_children(slug: str, limit: int = 25, skip: int = 0, catalogue: str = "",
             data = _api("GET", "/descriptions", key, params={"parent": parent["id"], "limit": _limit(limit), "skip": max(0, int(skip))})
             kids = [_hit(c["slug"], c.get("title"), c.get("level_of_description")) for c in data.get("results", []) if c.get("slug")]
             return {"source": _c.name, "parent": {"title": parent.get("title"), "url": _url(slug)}, "total": data.get("total", 0), "results": kids}
+        if _c.backend == "openric":
+            rec, kids = adapters.ric_children(slug, key)
+            start = max(0, int(skip))
+            return {"source": _c.name, "parent": {"title": rec["title"], "url": rec["url"]}, "total": len(kids),
+                    "results": kids[start:start + _limit(limit)]}
         tree = _api("GET", f"/informationobjects/tree/{slug}", key)
         if not _visitor_sees(slug):
             raise NotVisible()
@@ -294,6 +314,8 @@ def get_authority(slug: str, catalogue: str = "", ctx: Context | None = None) ->
     key = _read_key(ctx, catalogue)
 
     def run():
+        if _c.backend == "openric":
+            return adapters.ric_agent(slug, key)
         if _c.backend != "atom-ahg":
             return {"found": False, "message": "This catalogue's API does not publish authority records.", "source": _c.name}
         a = _api("GET", f"/authorities/{slug}", key)
@@ -323,9 +345,12 @@ def search_authorities(name: str, kind: Literal["person", "organisation", "famil
     key = _read_key(ctx, catalogue)
 
     def run():
+        n = _limit(limit)
+        if _c.backend == "openric":
+            hits = adapters.ric_search(name, n, 0, "Place" if kind == "place" else "Agent")
+            return {"source": _c.name, "total": len(hits), "results": [{"id": h["id"], "name": h.get("label"), "kind": kind, "slug": str(h["id"])} for h in hits]}
         if _c.backend != "atom-ahg":
             return {"found": False, "message": "This catalogue's API cannot search authority records.", "source": _c.name}
-        n = _limit(limit)
         if kind == "place":
             terms = _api("GET", f"/taxonomies/{PLACES_TAXONOMY_ID}/terms", key, params={"search": name}).get("terms", [])
             hits = [{"id": t["id"], "name": t.get("name"), "kind": "place"} for t in terms[:n]]
@@ -501,6 +526,10 @@ def propose_access_points_and_dates(slug: str, proposals: list[Proposal], ctx: C
                 "message": ("Queued for review. Nothing on the record changes until an archivist approves it."
                             if out.get("queued") else "Nothing new to queue: these were already proposed or linked for this record."),
             }
+        if _c.backend == "openric":
+            rec = adapters._read_openric(slug, key)
+            return {"source": _c.name, "url": rec["url"], "applied": False, "proposals": [p.model_dump() for p in items],
+                    "message": "This catalogue keeps no review queue: these are for an archivist to apply by hand."}
         rec = _read_base(slug, key)  # the record exists and a visitor may see it
         return {
             "source": _c.name, "url": _url(slug), "applied": False, "proposals": [p.model_dump() for p in items],
@@ -550,8 +579,8 @@ def propose_relationships(slug: str, relationships: list[Relationship], ctx: Con
         key = _needs_key(ctx)
         _budget(key, len(relationships))
         if _c.backend != "atom-ahg":
-            _read_base(slug, key)
-            return {"source": _c.name, "url": _url(slug), "applied": False, "proposals": [r.model_dump() for r in relationships],
+            rec = _read_record(slug, key)
+            return {"source": _c.name, "url": rec["url"], "applied": False, "proposals": [r.model_dump() for r in relationships],
                     "message": "This catalogue's API cannot add relationships, so nothing was saved. Add them on the authority records' edit screens."}
         out = _api("POST", f"/descriptions/{slug}/proposals", key, json={"source": "glam-mcp", "relationships": [
             {"subject_name": r.subject.strip(), "subject_actor_id": r.subject_existing_id, "relation": r.relation,
@@ -606,9 +635,9 @@ def propose_description_change(
                 "message": ("Queued for review. The archivist can edit it before approving; nothing changes until then."
                             if queued else "Nothing new to queue: the same text is already waiting for review."),
             }
-        _read_base(slug, key)
+        rec = _read_record(slug, key)
         return {
-            "source": _c.name, "url": _url(slug), "applied": False, "field": field, "text": text, "evidence": evidence, "sources": sources or [],
+            "source": _c.name, "url": rec["url"], "applied": False, "field": field, "text": text, "evidence": evidence, "sources": sources or [],
             "message": "Nothing was saved. Apply this on the record's edit screen.",
         }
     return _logged("propose_description_change", args, ctx, run)
@@ -635,8 +664,8 @@ def propose_transcription(slug: str, text: str, digital_object_id: int | None = 
             return {"queued": False, "message": "Nothing to propose.", "source": _c.name}
         _budget(key, 1)
         if _c.backend != "atom-ahg":
-            _read_base(slug, key)
-            return {"source": _c.name, "url": _url(slug), "applied": False, "text": text,
+            rec = _read_record(slug, key)
+            return {"source": _c.name, "url": rec["url"], "applied": False, "text": text,
                     "message": "This catalogue's API cannot store transcriptions, so nothing was saved."}
         out = _api("POST", f"/descriptions/{slug}/proposals", key, json={"source": "glam-mcp", "transcripts": [
             {"text": text, "digital_object_id": digital_object_id, "evidence": evidence}]})
@@ -673,8 +702,8 @@ def propose_translation(
             return {"queued": False, "message": "Nothing to propose.", "source": _c.name}
         _budget(key, 1)
         if _c.backend != "atom-ahg":
-            _read_base(slug, key)
-            return {"source": _c.name, "url": _url(slug), "applied": False, "field": field, "language": language, "text": text,
+            rec = _read_record(slug, key)
+            return {"source": _c.name, "url": rec["url"], "applied": False, "field": field, "language": language, "text": text,
                     "message": "Nothing was saved. Add this translation on the record's edit screen in that language."}
         out = _api("POST", f"/descriptions/{slug}/proposals", key, json={"source": "glam-mcp", "fields": [
             {"field": field, "culture": language.strip().lower(), "text": text, "evidence": evidence}]})
@@ -691,7 +720,7 @@ async def healthz(request: Request) -> JSONResponse:
     """ok only when the catalogue answers a real read with the service key;
     otherwise unreachable, key_refused or not_working, with 503."""
     try:
-        r = adapters._client.get(_c.api_base + ("/descriptions?limit=1" if _c.backend == "atom-ahg" else "/informationobjects?limit=1"),
+        r = adapters._client.get(_c.api_base + BACKENDS[_c.backend][2],
                                  headers={_c.key_header: _c.key})
         state = "ok" if r.status_code == 200 else "key_refused" if r.status_code in (401, 403) else "not_working"
     except Exception:

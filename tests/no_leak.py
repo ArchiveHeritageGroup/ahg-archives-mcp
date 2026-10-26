@@ -55,15 +55,30 @@ DB_NAME = os.environ.get("CATALOGUE_DB", "archive")
 PUBLIC_CONTROL = os.environ.get("PUBLIC_CONTROL_SLUG", "hendrik-and-debora-engelbrecht")
 CAP = int(os.environ.get("NO_LEAK_CAP", "40"))
 
-# Each kind of hidden record, with the table it needs; kinds whose table the
-# catalogue lacks (stock AtoM has drafts only) are left out.
+# Each kind of hidden record, with the table (or table.column) it needs; kinds
+# the catalogue lacks (stock AtoM has drafts only) are left out.
 HIDDEN_KINDS = [
     ("status", "SELECT object_id id, 'draft' why FROM status WHERE type_id = 158 AND status_id = 159"),
-    ("rights_embargo", """SELECT object_id, 'embargo' FROM rights_embargo
+    ("rights_embargo", """SELECT object_id id, 'embargo' why FROM rights_embargo
         WHERE lifted_at IS NULL AND (end_date IS NULL OR end_date > NOW()) AND (start_date IS NULL OR start_date <= NOW())"""),
-    ("object_security_classification", "SELECT object_id, 'classified' FROM object_security_classification WHERE active = 1"),
-    ("icip_access_restriction", """SELECT information_object_id, 'icip' FROM icip_access_restriction
+    # Heratio's embargo table (also present on PSIS); the rule of Heratio's DisclosureGate::embargoedIds.
+    ("embargo", """SELECT object_id id, 'embargo' why FROM embargo
+        WHERE status = 'active' AND start_date <= CURDATE() AND (end_date IS NULL OR end_date >= CURDATE())"""),
+    # Only levels above PUBLIC (level 0) hide a record.
+    ("object_security_classification", """SELECT osc.object_id id, 'classified' why FROM object_security_classification osc
+        JOIN security_classification sc ON sc.id = osc.classification_id
+        WHERE osc.active = 1 AND sc.level > 0"""),
+    ("icip_access_restriction", """SELECT information_object_id id, 'icip' why FROM icip_access_restriction
         WHERE (end_date IS NULL OR end_date > NOW())"""),
+    # Restrictions that pass down to everything below (Heratio: inherit_to_children, applies_to_descendants).
+    ("object_security_classification.inherit_to_children", """SELECT c.id id, 'classified (inherited)' why
+        FROM object_security_classification osc JOIN security_classification sc ON sc.id = osc.classification_id
+        JOIN information_object p ON p.id = osc.object_id JOIN information_object c ON c.lft > p.lft AND c.rgt < p.rgt
+        WHERE osc.active = 1 AND sc.level > 0 AND osc.inherit_to_children = 1"""),
+    ("icip_access_restriction.applies_to_descendants", """SELECT c.id id, 'icip (inherited)' why
+        FROM icip_access_restriction r JOIN information_object p ON p.id = r.information_object_id
+        JOIN information_object c ON c.lft > p.lft AND c.rgt < p.rgt
+        WHERE r.applies_to_descendants = 1 AND (r.end_date IS NULL OR r.end_date > NOW())"""),
 ]
 HIDDEN_SQL = """
 SELECT DISTINCT io.id, s.slug, COALESCE(i.title, ''), io.parent_id, h.why FROM (
@@ -100,8 +115,18 @@ async def call(s: ClientSession, tool: str, **args) -> dict:
 
 async def main() -> int:
     tables = {t for (t,) in sql("SHOW TABLES")}
-    kinds = "\n  UNION ".join(q for table, q in HIDDEN_KINDS if table in tables)
-    hidden = sql(HIDDEN_SQL.format(kinds=kinds))[:CAP]
+    tables |= {f"{t}.{c}" for t, c in sql("SELECT table_name, column_name FROM information_schema.columns "
+                                         "WHERE table_schema = DATABASE() AND column_name IN ('inherit_to_children', 'applies_to_descendants')")}
+    # Each kind gets its share of the cap, restricted kinds first, so thousands of
+    # drafts cannot crowd out the embargoed, classified and ICIP records.
+    present = [q for table, q in HIDDEN_KINDS if table in tables]
+    present = present[1:] + present[:1]  # drafts last
+    hidden, seen = [], set()
+    for i, q in enumerate(present):
+        share = (CAP - len(hidden)) // (len(present) - i)
+        for row in sql(HIDDEN_SQL.format(kinds=q) + f" LIMIT {share + len(seen)}"):
+            if row[0] not in seen and share > 0:
+                hidden.append(row); seen.add(row[0]); share -= 1
     if not hidden:
         print("FAIL no hidden records to test - the fixture or the query is wrong")
         return 1

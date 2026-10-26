@@ -45,21 +45,32 @@ UA = {"User-Agent": "AHG-GLAM-MCP/0.3 (+https://www.atom-extensions.com)", "Acce
 SAMPLE = 40
 
 
+# Each backend: its API path under the catalogue's address, the header its key goes
+# in, a read that proves the API works, and what to call it.
+BACKENDS = {
+    "atom-ahg": ("/api/v2", "X-API-Key", "/descriptions?limit=1", "AtoM with AHG extensions"),
+    "atom-base": ("/api", "REST-API-Key", "/informationobjects?limit=1", "AtoM"),
+    "openric": ("/api/ric/v1", "X-API-Key", "/records?limit=1", "OpenRiC"),
+}
+
+
 def detect_backend(public_base: str, key: str) -> str:
-    """auto: ask the catalogue which API it has. AHG REST API v2 (ahgAPIPlugin)
-    answers JSON at /api/v2, even when it refuses the key; stock AtoM's
-    arRestApiPlugin answers at /api. A catalogue that answers neither cannot be
-    served, so the service stops and is restarted to ask again."""
-    for backend, path, header in (("atom-ahg", "/api/v2/descriptions?limit=1", "X-API-Key"),
-                                  ("atom-base", "/api/informationobjects?limit=1", "REST-API-Key")):
+    """auto: ask the catalogue which API it has. OpenRiC answers RiC-O JSON-LD
+    at /api/ric/v1 (asked first: it also carries a copy of an AHG API); the AHG
+    REST API v2 (ahgAPIPlugin) answers JSON at /api/v2, even when it refuses the
+    key; stock AtoM's arRestApiPlugin answers at /api. A catalogue that answers
+    none cannot be served, so the service stops and is restarted to ask again."""
+    for backend in ("openric", "atom-ahg", "atom-base"):
+        path, header, probe, _ = BACKENDS[backend]
         try:
-            r = httpx.get(public_base + path, headers={**UA, header: key}, timeout=15.0)
+            r = httpx.get(public_base + path + probe, headers={**UA, header: key}, timeout=15.0)
             if r.status_code in (200, 401, 403) and "json" in r.headers.get("content-type", ""):
-                return backend
+                if backend != "openric" or "openric" in r.text[:2000]:
+                    return backend
         except httpx.HTTPError:
             pass
-    raise SystemExit(f"GLAM_BACKEND=auto: {public_base} answers neither /api/v2 (AHG) nor /api (stock AtoM REST API); "
-                     "check CATALOGUE_URL and that the API plugin is enabled, or set GLAM_BACKEND")
+    raise SystemExit(f"GLAM_BACKEND=auto: {public_base} answers neither /api/ric/v1 (OpenRiC), /api/v2 (AHG) nor /api (stock AtoM REST API); "
+                     "check CATALOGUE_URL and that the API is enabled, or set GLAM_BACKEND")
 
 
 def not_public(url: str) -> str | None:
@@ -77,6 +88,24 @@ def not_public(url: str) -> str | None:
     return None
 
 
+def _opens(c: httpx.Client, page: str, hops: int = 3) -> bool:
+    """Does this page open for a visitor? A redirect that stays on the same host
+    is followed (Heratio sends sector records on to /museum/..., /dam/...); one
+    to another host, or to sign-in, does not count as open."""
+    for _ in range(hops):
+        r = c.get(page, headers={"Accept": "text/html"}, follow_redirects=False)
+        if r.status_code == 200:
+            return True
+        nxt = r.headers.get("location") if r.is_redirect else None
+        if not nxt:
+            return False
+        target = httpx.URL(page).join(nxt)
+        if target.host != httpx.URL(page).host or "/login" in target.path:
+            return False
+        page = str(target)
+    return False
+
+
 def check(url: str, key: str, backend: str) -> str | None:
     """Why the key is not fit to serve the public, or None."""
     url = url.rstrip("/")
@@ -90,12 +119,23 @@ def check(url: str, key: str, backend: str) -> str | None:
                 return f"The catalogue refused this key ({r.status_code}). Give a key with the Read scope."
             body = r.json()
             slugs = [d["slug"] for d in (body.get("data", body).get("results") or []) if d.get("slug")]
+        elif backend == "openric":
+            # OpenRiC reads need no key: what matters is that every record it lists
+            # opens for a visitor on its public page (@id).
+            r = c.get(url + "/api/ric/v1/records", params={"limit": SAMPLE})
+            if r.status_code != 200:
+                return f"The catalogue's OpenRiC API answered {r.status_code}."
+            pages = [i["@id"] for i in (r.json().get("openric:items") or []) if str(i.get("@id", "")).startswith(url)]
+            hidden = [p for p in pages if not _opens(c, p)]
+            if hidden:
+                return f"{len(hidden)} of {len(pages)} sampled records do not open for a visitor (for example {hidden[0]})."
+            return None
         else:
             r = c.get(url + "/api/informationobjects", params={"limit": SAMPLE}, headers={"REST-API-Key": key})
             if r.status_code != 200:
                 return f"The catalogue refused this key ({r.status_code}). Give the REST API key of a user with no groups."
             return None  # stock AtoM: every record is checked against the public page as it is read
-        hidden = [s for s in slugs if c.get(f"{url}/{s}", headers={"Accept": "text/html"}).status_code != 200]
+        hidden = [s for s in slugs if not _opens(c, f"{url}/{s}")]
         if hidden:
             return (f"This key reads {len(hidden)} of {len(slugs)} sampled records a visitor cannot open (for example {hidden[0]}). "
                     "Give a key for a user with no groups.")

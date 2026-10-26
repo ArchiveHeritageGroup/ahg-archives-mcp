@@ -8,6 +8,7 @@ Run in the image, where the service's own libraries are:
 import functools
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -153,28 +154,29 @@ def _field(label, value_html):
             f'{label}</h3><div class="col-9 p-2">{value_html}</div></div>')
 
 
-STOCK_PAGE = "<html><body><h1>Letter of 1902 about Pretoria</h1>" + "".join([
+STOCK_PAGE = "<html><body><h1>Item TEST-1 - Letter of 1902 about Pretoria</h1>" + "".join([
+    _field("Reference code", "TEST-1"),
     _field("Title", "Letter of 1902 about Pretoria"),
-    _field("Date(s)", '<ul><li> 1902-05-03 (Creation) </li></ul>'),
+    _field("Date(s)", '<ul class="m-0"><li> 1902-05-03 (Creation) </li></ul>'),
+    _field("Level of description", "Item"),
+    _field("Name of creator", '<div class="creator"> <a href="/jan" title="Jan Pretorius">Jan Pretorius</a> </div>'),
     _field("Scope and content", "<p>Letter from Jan Pretorius to his sister Anna, Pretoria, 3 May 1902.</p>"),
     _field("Archival history", ""),  # hidden from visitors by the visible-elements settings: shown empty
-    _field("Place access points", '<ul><li><a href="/pretoria">Pretoria</a></li></ul>'),
-    _field("Name access points", '<ul><li><a href="/jan">Jan Pretorius</a></li></ul>'),
+    _field("Place access points", '<ul><li> <a href="/pretoria">Pretoria</a> </li></ul>'),
+    _field("Name access points", '<ul><li><a href="/anna">Anna Pretorius</a><span class="note2"> (Subject)</span></li></ul>'),
 ]) + "<h2>Explore</h2><p>Donor restriction applies to the Engelbrecht papers</p></body></html>"
 
+# What the stock REST API returns for the same record: more than the page shows.
 STOCK_API = {
-    "title": "Letter of 1902 about Pretoria", "reference_code": "TEST-1",
-    "dates": [{"date": "1902-05-03", "type": "Creation"}, {"date": "1902", "type": "Accumulation"}],
-    "scope_and_content": "Letter from Jan Pretorius to his sister Anna, Pretoria, 3 May 1902.",
-    "archival_history": "Pretoria",  # hidden, and a word that is on the page elsewhere
-    "place_access_points": ["Pretoria", "Secret farm"],
-    "name_access_points": ["Jan Pretorius", "Anna Pretorius"],
-    "creators": [{"authorized_form_of_name": "Jan Pretorius"}],
-    "notes": ["Donor restriction applies to the Engelbrecht papers"],  # on the page, but not under a note heading
+    "title": "Letter of 1902 about Pretoria", "reference_code": "TEST-1", "publication_status": "Draft",
+    "archival_history": "Bought from a private dealer in 1987", "place_access_points": ["Pretoria", "Secret farm"],
+    "notes": ["Donor restriction applies to the Engelbrecht papers"],
 }
 
 
 class StockFields(Base):
+    """Stock AtoM: every value comes from the public page; nothing from the API."""
+
     def setUp(self):
         super().setUp()
         self.stock = settings.Catalogue("Stock", "https://stock.example.org", "https://stock.example.org/api", "atom-base", "svc", "REST-API-Key")
@@ -186,27 +188,21 @@ class StockFields(Base):
         settings._current.reset(self.token)
         super().tearDown()
 
-    def test_shown_fields_pass(self):
+    def test_fields_as_the_page_shows_them(self):
         r = catalogue._read_base("rec", None)
-        self.assertEqual(r["scope_and_content"], STOCK_API["scope_and_content"])
-        self.assertEqual(r["places"], ["Pretoria"])
+        self.assertEqual((r["title"], r["reference_code"], r["level"]), ("Letter of 1902 about Pretoria", "TEST-1", "Item"))
+        self.assertEqual(r["scope_and_content"], "Letter from Jan Pretorius to his sister Anna, Pretoria, 3 May 1902.")
         self.assertEqual(r["dates"], [{"date": "1902-05-03", "type": "Creation"}])
+        self.assertEqual(r["names"], ["Jan Pretorius", "Anna Pretorius"])  # creator, then access point without "(Subject)"
+        self.assertEqual(r["places"], ["Pretoria"])
 
-    def test_a_value_that_appears_elsewhere_on_the_page_is_not_shown(self):
+    def test_nothing_only_the_api_returns_comes_through(self):
         r = catalogue._read_base("rec", None)
-        self.assertIsNone(r["archival_history"])  # "Pretoria" is on the page, but not under Archival history
-        self.assertIsNone(r["notes"])  # the note's text is on the page, but not under a note heading
-
-    def test_short_values_and_unlisted_items_are_dropped(self):
-        r = catalogue._read_base("rec", None)
-        self.assertNotIn({"date": "1902", "type": "Accumulation"}, r["dates"] or [])  # "1902" is on the page, not as this date
+        self.assertIsNone(r["archival_history"])  # empty on the page, filled in the API
         self.assertNotIn("Secret farm", r["places"])
-        self.assertEqual(r["names"], ["Jan Pretorius"])  # Anna is not an access point on the page; creators heading absent
-        self.assertIsNone(r["reference_code"])  # no Reference code heading on this page
-
-    def test_only_the_whole_value_counts(self):
-        sections = {"Scope and content": "Letter from Jan Pretorius to his sister Anna"}
-        self.assertIsNone(catalogue._shown("Letter from Jan Pretorius to his sister Anna, and a private remark", sections["Scope and content"]))
+        self.assertIsNone(r["notes"])  # the text is on the page, but not under a note heading
+        self.assertNotIn("Draft", json.dumps(r))
+        self.assertFalse([q for q in self.cat.seen if "/api/" in q.url.path])  # the API is not even asked
 
     def test_hidden_record_is_not_found(self):
         self.cat.routes[("GET", "stock.example.org/rec")] = httpx.Response(302, headers={"location": "/user/login"})
@@ -248,6 +244,16 @@ class KeyCheck(Base):
         self.cat.json("GET", "cat.example.org/api/v2/descriptions", {"data": {"results": [{"slug": "public-one"}]}})
         self.cat.routes[("GET", "cat.example.org/public-one")] = httpx.Response(200, text="<html>")
         self.assertIsNone(keycheck.check(HOME, "k", "atom-ahg"))
+
+    def test_same_host_redirects_are_followed_others_are_not(self):
+        self.cat.json("GET", "cat.example.org/api/v2/proposals", {"message": "Forbidden"}, 403)
+        self.cat.json("GET", "cat.example.org/api/v2/descriptions", {"data": {"results": [{"slug": "a-vase"}, {"slug": "a-draft"}, {"slug": "elsewhere"}]}})
+        self.cat.routes[("GET", "cat.example.org/a-vase")] = httpx.Response(302, headers={"location": "/museum/a-vase"})
+        self.cat.routes[("GET", "cat.example.org/museum/a-vase")] = httpx.Response(200, text="<html>")
+        self.cat.routes[("GET", "cat.example.org/a-draft")] = httpx.Response(302, headers={"location": "/user/login?next=/a-draft"})
+        self.cat.routes[("GET", "cat.example.org/elsewhere")] = httpx.Response(302, headers={"location": "https://other.example/x"})
+        self.cat.routes[("GET", "other.example/x")] = httpx.Response(200, text="<html>")
+        self.assertIn("2 of 3 sampled records", keycheck.check(HOME, "k", "atom-ahg"))
 
     def test_private_addresses_refused(self):
         for url in ("http://127.0.0.1:8097", "http://10.0.0.5", "file:///etc/passwd", "localhost"):
@@ -349,3 +355,110 @@ class Logs(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+RIC = "ric.example.org"
+RIC_RECORD = {
+    "@context": {"rico": "https://www.ica.org/standards/RiC/ontology#"},
+    "@id": f"https://{RIC}/informationobject/photo-taken-1936", "@type": "https://www.ica.org/standards/RiC/ontology#Record",
+    "rico:type": "Item", "rico:title": "Photo taken 1936", "rico:identifier": "PH-1", "rico:scopeAndContent": "A family on the stoep.",
+    "rico:hasOrHadHolder": {"@id": f"https://{RIC}/repository/x", "@type": "rico:CorporateBody", "rico:name": "Example Archive"},
+    "rico:hasOrHadSubject": [{"@type": "rico:Thing", "skos:prefLabel": "Families"}, {"@type": "rico:Thing", "skos:prefLabel": "Farms"}],
+    "rico:hasOrHadInstantiation": [{"@type": "rico:Instantiation", "rico:identifier": "ph1.jpg"}],
+}
+
+
+class OpenRiC(Base):
+    def setUp(self):
+        super().setUp()
+        self.ric = settings.Catalogue("OpenRiC", f"https://{RIC}", f"https://{RIC}/api/ric/v1", "openric", "", "X-API-Key")
+        settings.CATALOGUES = {"Home": settings.HOME, "OpenRiC": self.ric}
+        api = f"{RIC}/api/ric/v1"
+        self.cat.json("GET", f"{api}/autocomplete", [{"id": 890, "label": "Photo taken 1936", "type": "Record"},
+                                                      {"id": 726, "label": "Mobrey family", "type": "Agent"},
+                                                      {"id": 999, "label": "A draft", "type": "Record"}])
+        self.cat.routes[("GET", f"{api}/records/890")] = httpx.Response(200, json=RIC_RECORD, headers={"content-type": "application/ld+json"})
+        self.cat.routes[("GET", f"{api}/records/999")] = httpx.Response(
+            404, json={"type": "https://openric.org/errors/not-found", "title": "Not found", "status": 404, "detail": "No such record"})
+        self.cat.json("GET", f"{api}/relations-for/890", {"entity_id": 890, "outgoing": [], "total": 2, "incoming": [
+            {"target_name": "Mobrey family", "target_type": "Agent", "rico_predicate": "rico:resultsOrResultedFrom"},
+            {"target_name": "A deed", "target_type": "Record", "rico_predicate": "rico:hasOrHadPart"}]})
+        self.cat.json("GET", f"{api}/records/890/entities", {"places": [{"rico:name": "Graaff-Reinet"}], "rules": []})
+        self.cat.json("GET", f"{api}/agents/726", {"@id": f"https://{RIC}/actor/mobrey-family", "@type": "rico:Agent", "rico:name": "Mobrey family"})
+        self.cat.json("GET", f"{api}/hierarchy/890", {"entity_id": 890, "class": "QubitInformationObject", "parent": None,
+                                                      "children": [{"id": 891, "title": "Back of the photo", "level": "Item"}]})
+
+    def test_search_cites_each_records_own_page_and_skips_hidden_ones(self):
+        r = server.search_records("photo", catalogue="OpenRiC")
+        self.assertEqual(r["results"], [{"slug": "890", "title": "Photo taken 1936", "level": "Item",
+                                          "url": f"https://{RIC}/informationobject/photo-taken-1936"}])  # no agent, no hidden record
+
+    def test_read_maps_ric_o(self):
+        r = server.get_record("890", catalogue="OpenRiC")
+        self.assertEqual((r["title"], r["reference_code"], r["scope_and_content"], r["repository"]),
+                         ("Photo taken 1936", "PH-1", "A family on the stoep.", "Example Archive"))
+        self.assertEqual(r["subjects"], ["Families", "Farms"])
+        self.assertEqual((r["names"], r["places"]), (["Mobrey family"], ["Graaff-Reinet"]))
+        self.assertEqual(r["url"], f"https://{RIC}/informationobject/photo-taken-1936")
+
+    def test_hidden_record_and_problem_details(self):
+        r = server.get_record("999", catalogue="OpenRiC")
+        self.assertEqual(r["message"], "No visible record with that reference.")
+        self.cat.routes[("GET", f"{RIC}/api/ric/v1/records/890")] = httpx.Response(
+            429, json={"type": "about:blank", "title": "Too Many Requests", "status": 429, "detail": "60 requests a minute"})
+        self.assertEqual(server.get_record("890", catalogue="OpenRiC")["message"], "60 requests a minute")
+
+    def test_children_agents_and_what_it_does_not_offer(self):
+        self.assertEqual(server.get_children("890", catalogue="OpenRiC")["results"][0]["slug"], "891")
+        self.assertEqual(server.search_authorities("mobrey", catalogue="OpenRiC")["results"][0]["id"], 726)
+        self.assertEqual(server.get_authority("726", catalogue="OpenRiC")["name"], "Mobrey family")
+        self.assertIn("does not publish file text", server.get_record_text("890", catalogue="OpenRiC")["message"])
+        self.assertEqual(server.list_catalogues()["catalogues"][1]["kind"], "OpenRiC")
+
+    def test_detected_before_its_copy_of_an_ahg_api(self):
+        self.cat.json("GET", f"{RIC}/api/ric/v1/records", {"@type": "openricx:RecordList", "openric:items": []})
+        self.cat.json("GET", f"{RIC}/api/v2/descriptions", {"data": {"results": []}})
+        real = keycheck.httpx.get
+        keycheck.httpx.get = lambda url, **kw: httpx.Client(transport=httpx.MockTransport(self.cat)).get(url, headers=kw.get("headers"))
+        try:
+            self.assertEqual(keycheck.detect_backend(f"https://{RIC}", ""), "openric")
+        finally:
+            keycheck.httpx.get = real
+
+    def test_key_check_needs_every_listed_record_to_open_for_a_visitor(self):
+        self.cat.json("GET", f"{RIC}/api/ric/v1/records", {"openric:items": [
+            {"@id": f"https://{RIC}/informationobject/public-one"}, {"@id": f"https://{RIC}/informationobject/draft-one"}]})
+        self.cat.routes[("GET", f"{RIC}/informationobject/public-one")] = httpx.Response(200, text="<html>")
+        self.assertIn("1 of 2 sampled records", keycheck.check(f"https://{RIC}", "", "openric"))
+
+
+class NoWritePath(unittest.TestCase):
+    """Nothing the assistant does can change a record: the only calls the code
+    sends that are not reads are a search and the review-queue call. Read from
+    the code itself, so a new write path fails this test."""
+
+    def test_only_search_and_the_review_queue_are_not_reads(self):
+        import ast
+        allowed = {("POST", "/search"), ("POST", "/descriptions/{slug}/proposals")}
+        found = set()
+        src_dir = os.path.join(os.path.dirname(__file__), "..", "glam_mcp")
+        for name in os.listdir(src_dir):
+            if not name.endswith(".py"):
+                continue
+            for node in ast.walk(ast.parse(open(os.path.join(src_dir, name)).read())):
+                if isinstance(node, ast.Call) and getattr(node.func, "id", getattr(node.func, "attr", "")) == "_api" and node.args:
+                    method = ast.literal_eval(node.args[0]) if isinstance(node.args[0], ast.Constant) else "?"
+                    path = ast.unparse(node.args[1]).strip("f'\"") if len(node.args) > 1 else "?"
+                    if method != "GET":
+                        found.add((method, path))
+                # A raw client call that could write (post, put, patch, delete) outside _api.
+                if isinstance(node, ast.Attribute) and node.attr in ("post", "put", "patch", "delete") and \
+                        isinstance(node.value, ast.Name) and node.value.id in ("_client", "httpx"):
+                    found.add(("raw", f"{name}: {node.value.id}.{node.attr}"))
+            text = open(os.path.join(src_dir, name)).read()
+            # The one call whose method is a value is inside _api, whose callers are checked above.
+            for m in re.finditer(r"\.(request|send)\(", text):
+                found.add(("value", f"{name}: .{m.group(1)}(")) if not (name == "catalogue.py" and "def _api(" in text[:m.start()]
+                                                                       and text[:m.start()].rfind("\ndef ") == text.find("\ndef _api(")) else None
+        self.assertEqual(found - allowed, set(), "a call that is not a read and not the review queue")
+        self.assertEqual(found, allowed)

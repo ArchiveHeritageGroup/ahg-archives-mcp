@@ -79,7 +79,8 @@ def _api(method: str, path: str, key: str | None = None, **kw) -> Any:
     # 429: the key's hourly or daily limit is used up (atom-ahg-plugins#223).
     if r.status_code in (401, 403, 429, 501):
         try:
-            message = r.json().get("message") or "Not authorised"
+            body = r.json()  # {message}, or RFC 7807 {title, detail} (OpenRiC)
+            message = body.get("message") or body.get("detail") or body.get("title") or "Not authorised"
         except Exception:
             message = "Not authorised"
         raise Refused(message)
@@ -144,23 +145,13 @@ def _visitor_sees(slug: str) -> bool:
     return ok
 
 
-def _names_base(d: dict) -> list:
-    """Creators and name access points, as names."""
-    out = []
-    for n in (d.get("creators") or []) + (d.get("name_access_points") or []):
-        n = n.get("authorized_form_of_name") if isinstance(n, dict) else n
-        if n and n not in out:
-            out.append(n)
-    return out
-
-
 def _clean(fragment: str) -> str:
     return " ".join(html.unescape(re.sub(r"<[^>]+>", " ", fragment)).split())
 
 
 def _page_sections(slug: str) -> dict[str, str] | None:
     """Stock AtoM only: the record's public page as a visitor gets it, as
-    {heading: the text under it until the next heading}; None when hidden.
+    {heading: the HTML under it until the next heading}; None when hidden.
     AtoM 2.10 shows each field as a heading (h3, or h4 inside an area)
     followed by its value."""
     try:
@@ -169,73 +160,145 @@ def _page_sections(slug: str) -> dict[str, str] | None:
         return None
     if r.status_code != 200 or _off_network(r):
         return None
-    parts = re.split(r"<h[2-4][^>]*>(.*?)</h[2-4]>", r.text, flags=re.S)
+    parts = re.split(r"<h([1-4])[^>]*>(.*?)</h\1>", r.text, flags=re.S)
     sections: dict[str, str] = {}
-    for label, body in zip(parts[1::2], parts[2::2]):
+    for level, label, body in zip(parts[1::3], parts[2::3], parts[3::3]):
         label = _clean(label)
-        if label:
-            sections[label] = (sections.get(label, "") + " " + _clean(body)).strip()
+        if level == "1":
+            sections.setdefault("_heading", label)
+        elif label:
+            sections[label] = sections.get(label, "") + body
     return sections
 
 
-# Each stock API field, and the headings its value appears under on the public page.
-FIELD_HEADINGS = {
-    "reference_code": ("Reference code",),
-    "dates": ("Date(s)",),
-    "extent_and_medium": ("Extent and medium",),
-    "scope_and_content": ("Scope and content",),
-    "archival_history": ("Archival history",),
-    "creators": ("Name of creator",),
-    "name_access_points": ("Name access points",),
-    "subject_access_points": ("Subject access points",),
-    "place_access_points": ("Place access points",),
-    "notes": ("Note", "Notes", "General note", "Archivist's note"),
-    "repository": ("Repository",),
-}
+def _text_under(sections: dict[str, str], *headings: str) -> str | None:
+    return " ".join(t for t in (_clean(sections.get(h, "")) for h in headings) if t) or None
 
 
-def _shown(value: Any, shown_text: str) -> Any:
-    """The part of a field a visitor sees, or None. shown_text is what the page
-    shows under that field's own heading. A text counts as shown only when the
-    whole of it appears there, not as part of a longer word, number or date; lists keep only the items shown. Text the page
-    renders differently (markup) is dropped: fail closed."""
-    if isinstance(value, list):
-        kept = [v for v in value if _shown(v, shown_text) is not None]
-        return kept or None
-    text = value
-    if isinstance(value, dict):
-        text = next((value[k] for k in ("content", "date", "authorized_form_of_name", "name", "title") if value.get(k)), "")
-    text = " ".join(str(text or "").split())
-    # Whole value only, standing on its own: "1902" is not shown by "1902-05-03",
-    # nor "Anna" by "Annabel".
-    return value if text and re.search(r"(?<![\w-])" + re.escape(text) + r"(?![\w-])", shown_text) else None
+def _items_under(sections: dict[str, str], heading: str) -> list[str]:
+    """The list items under one heading, without AtoM's role notes ("(Subject)")."""
+    body = re.sub(r'<span class="note2">.*?</span>', "", sections.get(heading, ""), flags=re.S)
+    return [t for t in (_clean(li) for li in re.findall(r"<li[^>]*>(.*?)</li>", body, flags=re.S)) if t]
 
 
-def _field(d: dict, name: str, sections: dict[str, str]) -> Any:
-    under = " | ".join(sections.get(h, "") for h in FIELD_HEADINGS[name])
-    return _shown(d.get(name), under)
+def _dates_under(sections: dict[str, str]) -> list[dict] | None:
+    out = []
+    for item in _items_under(sections, "Date(s)"):
+        m = re.match(r"^(.*?)\s*\(([^()]*)\)$", item)
+        out.append({"date": m.group(1), "type": m.group(2)} if m else {"date": item})
+    return out or None
 
 
 def _read_base(slug: str, key: str | None) -> dict:
-    """Stock AtoM's REST API returns fields the site may hide from visitors
-    (visible-elements settings, archivist's notes). Each field is kept only
-    where the public page shows the whole value under that field's own heading,
-    for every caller. ponytail: staff with their own key see visitor fields too
-    here; full staff reads need the AHG API."""
+    """Stock AtoM: the record as its public page shows it to a visitor. Stock
+    AtoM's REST API returns fields the site hides (draft status unchecked,
+    visible-elements settings, archivist's notes), so no field is taken from
+    the API: every value here is what AtoM itself rendered for a visitor, after
+    its own access rules. The API is used only to find records (search,
+    children). ponytail: staff with their own key also see visitor fields here;
+    full staff reads need the AHG API. Depends on AtoM 2.10's page layout,
+    which tests/test_server.py fixes."""
     sections = _page_sections(slug)
     _visible_cache[(_c.public_base, slug)] = (time.time(), sections is not None)
     if sections is None:
         raise NotVisible()
-    d = _api("GET", f"/informationobjects/{slug}", key)
-    f = lambda name: _field(d, name, sections)  # noqa: E731
-    names = _names_base({"creators": f("creators") or [], "name_access_points": f("name_access_points") or []})
+    creators = re.findall(r'<div class="creator">\s*<a[^>]*>(.*?)</a>', sections.get("Name of creator", ""), flags=re.S)
+    names = []
+    for n in [_clean(c) for c in creators] + _items_under(sections, "Name access points"):
+        if n and n not in names:
+            names.append(n)
     return {
         "found": True, "source": _c.name, "url": _url(slug), "slug": slug,
-        "title": d.get("title"), "reference_code": f("reference_code"), "level": d.get("level_of_description"),
-        "dates": f("dates"), "extent": f("extent_and_medium"), "scope_and_content": f("scope_and_content"),
-        "archival_history": f("archival_history"), "names": names,
-        "subjects": f("subject_access_points"), "places": f("place_access_points"), "notes": f("notes"),
-        "repository": f("repository"), "part_of": [], "children_count": None, "images": [],
+        "title": _text_under(sections, "Title") or sections.get("_heading"),
+        "reference_code": _text_under(sections, "Reference code"), "level": _text_under(sections, "Level of description"),
+        "dates": _dates_under(sections), "extent": _text_under(sections, "Extent and medium"),
+        "scope_and_content": _text_under(sections, "Scope and content"), "archival_history": _text_under(sections, "Archival history"),
+        "names": names, "subjects": _items_under(sections, "Subject access points") or None,
+        "places": _items_under(sections, "Place access points") or None,
+        "notes": _text_under(sections, "Note", "Notes", "General note", "Archivist's note"),
+        "repository": _text_under(sections, "Repository"), "part_of": [], "children_count": None, "images": [],
+    }
+
+
+# ── OpenRiC (RiC-O JSON-LD at /api/ric/v1, read only) ───────────────────────
+# Records, agents and places come as JSON-LD with an @id that is the record's
+# public page. OpenRiC has no full-text search (its title autocomplete is used),
+# no file text and no review queue. A record's numeric id (from search) reads
+# its places and related agents too.
+
+def _ric_label(v: Any) -> str | None:
+    """The text of a RiC-O value: a string, {"@value"}, or a node with a name or label."""
+    if isinstance(v, str):
+        return v.strip() or None
+    if isinstance(v, dict):
+        for k in ("@value", "rico:title", "rico:name", "skos:prefLabel", "rdfs:label", "rico:textualValue", "rico:expressedDate"):
+            if v.get(k):
+                return _ric_label(v[k])
+    return None
+
+
+def _ric_labels(v: Any) -> list[str]:
+    items = v if isinstance(v, list) else [v] if v else []
+    return [t for t in (_ric_label(i) for i in items) if t]
+
+
+def _ric_ref(at_id: str | None) -> str | None:
+    """The slug at the end of a record's @id (its public page)."""
+    return at_id.rstrip("/").rsplit("/", 1)[-1] if at_id else None
+
+
+def ric_search(query: str, n: int, s: int, types: str = "Record") -> list[dict]:
+    """Title search through OpenRiC's autocomplete (it has no full-text search
+    and no paging, so skip is applied here). Each hit: id, label, type."""
+    hits = _api("GET", "/autocomplete", params={"q": query, "limit": min(s + n, 50)})
+    hits = hits if isinstance(hits, list) else []
+    return [h for h in hits if h.get("type") in types.split(",")][s:s + n]
+
+
+def _read_openric(slug: str, key: str | None) -> dict:
+    d = _api("GET", f"/records/{slug}", key)
+    rid = slug if str(slug).isdigit() else None
+    names, places = [], []
+    if rid:  # related agents and places are read by numeric id only
+        rel = _api("GET", f"/relations-for/{rid}", key)
+        names = sorted({r["target_name"] for r in (rel.get("outgoing") or []) + (rel.get("incoming") or [])
+                        if r.get("target_type") == "Agent" and r.get("target_name")})
+        ents = _api("GET", f"/records/{rid}/entities", key, params={"types": "places"})
+        places = _ric_labels(ents.get("places") if isinstance(ents, dict) else None)
+    holder = d.get("rico:hasOrHadHolder")
+    return {
+        "found": True, "source": _c.name, "url": d.get("@id"), "slug": slug,
+        "title": _ric_label(d.get("rico:title")), "reference_code": _ric_label(d.get("rico:identifier")),
+        "level": _ric_label(d.get("rico:type")) or str(d.get("@type", "")).rsplit("#", 1)[-1],
+        "dates": _ric_labels(d.get("rico:isAssociatedWithDate") or d.get("rico:date")) or None,
+        "extent": None, "scope_and_content": _ric_label(d.get("rico:scopeAndContent")),
+        "archival_history": _ric_label(d.get("rico:history")), "names": names,
+        "subjects": _ric_labels(d.get("rico:hasOrHadSubject")) or None, "places": places or None, "notes": None,
+        "repository": _ric_label(holder), "part_of": [], "children_count": None, "images": [],
+    }
+
+
+def ric_children(slug: str, key: str | None) -> tuple[dict, list[dict]]:
+    """The record and the records directly below it, from OpenRiC's hierarchy walk."""
+    rec = _read_openric(slug, key)
+    if not str(slug).isdigit():
+        return rec, []
+    tree = _api("GET", f"/hierarchy/{slug}", key, params={"include": "children"})
+    kids = []
+    for c in (tree.get("children") or []) if isinstance(tree, dict) else []:
+        cid = c.get("id") or c.get("entity_id")
+        if cid:
+            kids.append({"slug": str(cid), "title": _ric_label(c.get("title") or c.get("rico:title") or c.get("label")),
+                         "level": _ric_label(c.get("level") or c.get("class")), "url": c.get("@id")})
+    return rec, kids
+
+
+def ric_agent(slug: str, key: str | None) -> dict:
+    a = _api("GET", f"/agents/{slug}", key)
+    return {
+        "found": True, "source": _c.name, "url": a.get("@id"), "name": _ric_label(a.get("rico:name")),
+        "entity_type": str(a.get("@type", "")).rsplit(":", 1)[-1], "dates_of_existence": _ric_label(a.get("rico:hasOrHadDateOfExistence")),
+        "history": _ric_label(a.get("rico:history")), "places": None, "functions": None,
     }
 
 
