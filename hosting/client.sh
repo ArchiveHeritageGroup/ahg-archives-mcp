@@ -8,7 +8,7 @@
 #   hosting/client.sh publish <client>    nginx site + certificate (sudo; after DNS and the leak test)
 #   hosting/client.sh check <client>      service health and the key check again
 #   hosting/client.sh list
-#   hosting/client.sh remove <client>     stops it; keeps its logs under clients/.removed-*
+#   hosting/client.sh remove <client>     stops it and deletes everything of it: key, secret, data, logs
 #
 # <client> is a short name (a-z, 0-9, -); the host defaults to <client>.mcp.theahg.co.za.
 # The service key is asked for (or taken from CLIENT_KEY): a read-only key from the
@@ -104,7 +104,7 @@ list)
 remove)
   D=$(dir_of "${2:-}"); [ -e "$D/.env" ] || die "No client $2"
   HOST=$(env_of "$D" HOST)
-  read -rp "Stop and remove $2 ($HOST)? Type the client name to confirm: " OK
+  read -rp "Stop $2 ($HOST) and delete its key, secret, data and logs? Type the client name to confirm: " OK
   [ "$OK" = "$2" ] || die "Not removed."
   docker compose --project-directory "$D" down
   if [ -e "/etc/nginx/sites-enabled/$HOST.conf" ]; then
@@ -112,9 +112,10 @@ remove)
     sudo nginx -t && sudo systemctl reload nginx
     sudo certbot delete --cert-name "$HOST" --non-interactive || true
   fi
-  rm -f "$D/.env"   # the key and secret go; logs and data stay for the record
-  mv "$D" "$CLIENTS/.removed-$2-$(date +%Y%m%d)"
-  echo "Removed $2. Logs kept in $CLIENTS/.removed-$2-$(date +%Y%m%d)."
+  # Hosted service terms: when an institution leaves, its key, secret, sign-ins,
+  # demo catalogues and call logs are all deleted. Back it up first if it is needed.
+  rm -rf "$D"
+  echo "Removed $2: key, secret, data and logs deleted."
   ;;
 *)
   sed -n 2,14p "$0"; exit 1

@@ -51,12 +51,14 @@ This module is the MCP layer: the tools, sign-in and the web routes. The rest:
 """
 
 
+import functools
 import json
 import os
 import time
 from collections import defaultdict
 from typing import Any, Literal
 
+import anyio.to_thread
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.utilities.types import Image
 from pydantic import BaseModel, Field
@@ -156,6 +158,22 @@ if _provider is not None:
     mcp.custom_route("/login", methods=["POST"])(_provider.login_post)
 
 
+def tool():
+    """Register a tool that runs in a worker thread. The tools wait on catalogues
+    over HTTP; run in the server's event loop they held every other caller up, so
+    the service answered one call at a time (load test, 26 Oct 2026: 11 to 13 calls
+    a second whether 1 or 25 clients asked). The function itself stays plain and
+    synchronous, which is what the tests call. Context variables (the caller's
+    sign-in, the current catalogue) are carried into the thread by anyio."""
+    def register(fn):
+        @functools.wraps(fn)
+        async def in_thread(*args, **kwargs):
+            return await anyio.to_thread.run_sync(functools.partial(fn, *args, **kwargs))
+        mcp.tool()(in_thread)
+        return fn
+    return register
+
+
 def _limit(n: int) -> int:
     return max(1, min(int(n), MAX_LIMIT))
 
@@ -166,7 +184,7 @@ def _hit(slug: str, title: Any, level: Any) -> dict:
 
 # ── Reads ───────────────────────────────────────────────────────────────────
 
-@mcp.tool()
+@tool()
 def search_records(query: str, limit: int = 10, skip: int = 0, catalogue: str = "", ctx: Context | None = None) -> dict:
     """Search archival descriptions (fonds, series, files, items) by keyword.
 
@@ -205,13 +223,13 @@ def search_records(query: str, limit: int = 10, skip: int = 0, catalogue: str = 
     return _logged("search_records", {"query": query, "limit": limit, "skip": skip, "catalogue": catalogue}, ctx, run)
 
 
-@mcp.tool()
-def list_catalogues() -> dict:
+@tool()
+def list_catalogues(ctx: Context | None = None) -> dict:
     """The catalogues this service can search and read. Proposals go to the home catalogue only."""
-    return {"catalogues": [{"name": c.name, "url": c.public_base, "home": c.home,
-                            "kind": BACKENDS[c.backend][3],
-                            "proposals": c.home and AUTH_MODE == "oauth", **({"demo": True} if c.demo else {})}
-                           for c in _catalogues().values()]}
+    return _logged("list_catalogues", {}, ctx, lambda: {"catalogues": [
+        {"name": c.name, "url": c.public_base, "home": c.home, "kind": BACKENDS[c.backend][3],
+         "proposals": c.home and AUTH_MODE == "oauth", **({"demo": True} if c.demo else {})}
+        for c in _catalogues().values()]})
 
 
 def _read_record(slug: str, key: str | None) -> dict:
@@ -219,7 +237,7 @@ def _read_record(slug: str, key: str | None) -> dict:
     return {"atom-ahg": _read_ahg, "atom-base": _read_base, "openric": adapters._read_openric}[_c.backend](slug, key)
 
 
-@mcp.tool()
+@tool()
 def get_record(slug: str, catalogue: str = "", ctx: Context | None = None) -> dict:
     """Read one archival description in full, by its slug (the last part of its URL).
 
@@ -231,7 +249,7 @@ def get_record(slug: str, catalogue: str = "", ctx: Context | None = None) -> di
     return _logged("get_record", {"slug": slug, "catalogue": catalogue}, ctx, lambda: _read_record(slug, key))
 
 
-@mcp.tool()
+@tool()
 def get_children(slug: str, limit: int = 25, skip: int = 0, catalogue: str = "", ctx: Context | None = None) -> dict:
     """List the descriptions directly below one record (for example the series in a fonds)."""
     key = _read_key(ctx, catalogue)
@@ -257,7 +275,7 @@ def get_children(slug: str, limit: int = 25, skip: int = 0, catalogue: str = "",
     return _logged("get_children", {"slug": slug, "limit": limit, "skip": skip, "catalogue": catalogue}, ctx, run)
 
 
-@mcp.tool()
+@tool()
 def work_through_series(slug: str, limit: int = 10, skip: int = 0, ctx: Context | None = None) -> dict:
     """Work through every record below a parent (for example each page of a family
     Bible), a batch at a time, with a running summary of what you proposed where.
@@ -308,7 +326,7 @@ def work_through_series(slug: str, limit: int = 10, skip: int = 0, ctx: Context 
     return _logged("work_through_series", {"slug": slug, "limit": limit, "skip": skip}, ctx, run)
 
 
-@mcp.tool()
+@tool()
 def get_authority(slug: str, catalogue: str = "", ctx: Context | None = None) -> dict:
     """Read an authority record (a person, family or organisation) by its slug."""
     key = _read_key(ctx, catalogue)
@@ -317,7 +335,7 @@ def get_authority(slug: str, catalogue: str = "", ctx: Context | None = None) ->
         if _c.backend == "openric":
             return adapters.ric_agent(slug, key)
         if _c.backend != "atom-ahg":
-            return {"found": False, "message": "This catalogue's API does not publish authority records.", "source": _c.name}
+            return {"found": False, "error": "unsupported", "message": "This catalogue's API does not publish authority records.", "source": _c.name}
         a = _api("GET", f"/authorities/{slug}", key)
         return {
             "found": True, "source": _c.name, "url": _url(slug), "name": a.get("authorized_form_of_name"),
@@ -331,7 +349,7 @@ PLACES_TAXONOMY_ID = 42
 AUTHORITY_KINDS = {"person": "person", "organisation": "organization", "family": "family"}
 
 
-@mcp.tool()
+@tool()
 def search_authorities(name: str, kind: Literal["person", "organisation", "family", "place"] = "person",
                        limit: int = 10, catalogue: str = "", ctx: Context | None = None) -> dict:
     """Find existing authority records (people, organisations, families) or places by name.
@@ -350,7 +368,7 @@ def search_authorities(name: str, kind: Literal["person", "organisation", "famil
             hits = adapters.ric_search(name, n, 0, "Place" if kind == "place" else "Agent")
             return {"source": _c.name, "total": len(hits), "results": [{"id": h["id"], "name": h.get("label"), "kind": kind, "slug": str(h["id"])} for h in hits]}
         if _c.backend != "atom-ahg":
-            return {"found": False, "message": "This catalogue's API cannot search authority records.", "source": _c.name}
+            return {"found": False, "error": "unsupported", "message": "This catalogue's API cannot search authority records.", "source": _c.name}
         if kind == "place":
             terms = _api("GET", f"/taxonomies/{PLACES_TAXONOMY_ID}/terms", key, params={"search": name}).get("terms", [])
             hits = [{"id": t["id"], "name": t.get("name"), "kind": "place"} for t in terms[:n]]
@@ -362,25 +380,25 @@ def search_authorities(name: str, kind: Literal["person", "organisation", "famil
     return _logged("search_authorities", {"name": name, "kind": kind, "limit": limit, "catalogue": catalogue}, ctx, run)
 
 
-@mcp.tool()
+@tool()
 def get_iiif_manifest(slug: str, catalogue: str = "", ctx: Context | None = None) -> dict:
     """Return the IIIF manifest URL for a record's images, for viewing in a IIIF viewer."""
     key = _read_key(ctx, catalogue)
 
     def run():
         if _c.backend != "atom-ahg":
-            return {"found": False, "message": "This catalogue does not publish IIIF manifests.", "source": _c.name}
+            return {"found": False, "error": "unsupported", "message": "This catalogue does not publish IIIF manifests.", "source": _c.name}
         # Visibility is decided by the API first; the manifest is only offered for
         # records this key may read.
         rec = _read_ahg(slug, key)
         if not rec["images"]:
-            return {"found": False, "message": "This record has no viewable images.", "source": _c.name, "url": _url(slug)}
+            return {"found": False, "error": "no_image", "message": "This record has no viewable images.", "source": _c.name, "url": _url(slug)}
         manifest = f"{_c.public_base}/iiif/manifest/{slug}"
         return {"found": True, "source": _c.name, "url": _url(slug), "title": rec["title"], "iiif_manifest": manifest}
     return _logged("get_iiif_manifest", {"slug": slug, "catalogue": catalogue}, ctx, run)
 
 
-@mcp.tool()
+@tool()
 def get_record_text(slug: str, offset: int = 0, limit: int = 20000, catalogue: str = "", ctx: Context | None = None) -> dict:
     """Read the text held for a record's files: text extracted from a PDF or by OCR,
     and transcriptions of audio or video.
@@ -395,7 +413,7 @@ def get_record_text(slug: str, offset: int = 0, limit: int = 20000, catalogue: s
 
     def run():
         if _c.backend != "atom-ahg":
-            return {"found": False, "message": "This catalogue's API does not publish file text.", "source": _c.name}
+            return {"found": False, "error": "unsupported", "message": "This catalogue's API does not publish file text.", "source": _c.name}
         d = _api("GET", f"/descriptions/{slug}/text", key, params={"start": max(0, int(offset)), "chars": max(1, min(int(limit), 50000))})
         texts = d.get("texts", [])
         if not texts:
@@ -405,7 +423,7 @@ def get_record_text(slug: str, offset: int = 0, limit: int = 20000, catalogue: s
     return _logged("get_record_text", args, ctx, run)
 
 
-@mcp.tool()
+@tool()
 def get_record_image(slug: str, catalogue: str = "", ctx: Context | None = None) -> list:
     """Look at a record's image: returns the reference image itself, so you can
     describe what it shows, read inscriptions or labels, or judge its condition.
@@ -464,7 +482,7 @@ class Proposal(BaseModel):
     link_reason: str = Field("", description="With existing_id: why it is the same person, organisation or place, e.g. matching dates or places.")
 
 
-@mcp.tool()
+@tool()
 def list_my_proposals(status: Literal["pending", "approved", "edited", "linked", "rejected", "new_record_created", "parked"] | None = None,
                       limit: int = 25, skip: int = 0, ctx: Context | None = None) -> dict:
     """List the proposals you made and what became of them, newest first.
@@ -480,14 +498,14 @@ def list_my_proposals(status: Literal["pending", "approved", "edited", "linked",
     def run():
         key = _needs_key(ctx)
         if _c.backend != "atom-ahg":
-            return {"found": False, "message": "This catalogue keeps no proposals: they are returned for the archivist to apply.", "source": _c.name}
+            return {"found": False, "error": "unsupported", "message": "This catalogue keeps no proposals: they are returned for the archivist to apply.", "source": _c.name}
         data = _api("GET", "/proposals", key, params={"mine": 1, "count": _limit(limit), "start": max(0, int(skip)), **({"status": status} if status else {})})
         results = [{**r, "url": _url(r["slug"]) if r.get("slug") else None} for r in data.get("results", [])]
         return {"source": _c.name, "total": data.get("total", len(results)), "results": results}
     return _logged("list_my_proposals", args, ctx, run)
 
 
-@mcp.tool()
+@tool()
 def propose_access_points_and_dates(slug: str, proposals: list[Proposal], ctx: Context | None = None) -> dict:
     """Propose access points (people, organisations, places) and dates for one record.
 
@@ -561,7 +579,7 @@ class Relationship(BaseModel):
     sources: list[str] = Field(default_factory=list, description="URLs of web sources used, if any.")
 
 
-@mcp.tool()
+@tool()
 def propose_relationships(slug: str, relationships: list[Relationship], ctx: Context | None = None) -> dict:
     """Propose relationships between people or organisations that a record states,
     such as a marriage or parent and child in a family register.
@@ -598,7 +616,7 @@ def propose_relationships(slug: str, relationships: list[Relationship], ctx: Con
     return _logged("propose_relationships", args, ctx, run)
 
 
-@mcp.tool()
+@tool()
 def propose_description_change(
     slug: str,
     field: Literal["title", "scope_and_content", "archival_history", "extent_and_medium", "arrangement", "access_conditions", "reproduction_conditions"],
@@ -643,7 +661,7 @@ def propose_description_change(
     return _logged("propose_description_change", args, ctx, run)
 
 
-@mcp.tool()
+@tool()
 def propose_transcription(slug: str, text: str, digital_object_id: int | None = None, evidence: str = "",
                           ctx: Context | None = None) -> dict:
     """Propose a transcription of a record's file, such as a scanned page with no text.
@@ -676,7 +694,7 @@ def propose_transcription(slug: str, text: str, digital_object_id: int | None = 
     return _logged("propose_transcription", args, ctx, run)
 
 
-@mcp.tool()
+@tool()
 def propose_translation(
     slug: str,
     field: Literal["title", "scope_and_content", "archival_history", "extent_and_medium", "arrangement", "access_conditions", "reproduction_conditions"],

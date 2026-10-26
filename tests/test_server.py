@@ -221,7 +221,9 @@ class Proposals(Base):
         # A second connection to the same file, as after a restart.
         import sqlite3
         db = sqlite3.connect(os.path.join(TMP, "proposal-cap.db"))
-        self.assertEqual(db.execute("SELECT COUNT(*) FROM spent").fetchone()[0], 3)
+        import hashlib
+        k1 = hashlib.sha256(b"k1").hexdigest()
+        self.assertEqual(db.execute("SELECT COUNT(*) FROM spent WHERE key = ?", (k1,)).fetchone()[0], 3)
         with self.assertRaises(catalogue.Refused):
             calls._budget("k1", 3)
         self.assertEqual(calls._budget("k1"), 2)  # a refusal spends nothing
@@ -418,7 +420,7 @@ class OpenRiC(Base):
         kid = server.get_children("890", catalogue="OpenRiC")["results"][0]
         self.assertEqual((kid["slug"], kid["title"], kid["url"]), ("891", "Back of the photo", f"https://{RIC}/informationobject/back"))
         server.search_records("photo", catalogue="OpenRiC")
-        self.assertEqual([q.url.params.get("types") for q in self.cat.seen if q.url.path.endswith("/autocomplete")][-1], "records")
+        self.assertEqual([q.url.params.get("types") for q in self.cat.seen if q.url.path.endswith("/autocomplete")][-1], "record")
         self.assertEqual(server.search_authorities("mobrey", catalogue="OpenRiC")["results"][0]["id"], 726)
         self.assertEqual(server.get_authority("726", catalogue="OpenRiC")["name"], "Mobrey family")
         self.assertIn("does not publish file text", server.get_record_text("890", catalogue="OpenRiC")["message"])
@@ -471,3 +473,102 @@ class NoWritePath(unittest.TestCase):
                                                                        and text[:m.start()].rfind("\ndef ") == text.find("\ndef _api(")) else None
         self.assertEqual(found - allowed, set(), "a call that is not a read and not the review queue")
         self.assertEqual(found, allowed)
+
+
+class ErrorCodes(Base):
+    """Every failure answers {found: false, error: <code>, message, source}."""
+
+    def test_each_failure_has_its_code(self):
+        self.assertEqual(server.get_record("missing")["error"], "not_found")
+        for status, code in ((401, "refused"), (403, "refused"), (429, "rate_limited"), (501, "unsupported")):
+            self.cat.json("GET", "cat.example.org/api/v2/descriptions/x", {"message": "no"}, status)
+            self.assertEqual(server.get_record("x")["error"], code, status)
+        self.cat.routes[("GET", "cat.example.org/api/v2/descriptions/x")] = httpx.Response(500)
+        self.assertEqual(server.get_record("x")["error"], "unavailable")
+        self.assertEqual(server.get_record("x", catalogue="Nope")["error"], "unknown_catalogue")
+        self.assertEqual(server.propose_description_change("x", "title", "t")["error"], "needs_sign_in")
+
+    def test_every_failure_shape_in_the_code_carries_a_code(self):
+        import ast
+        src_dir = os.path.join(os.path.dirname(__file__), "..", "glam_mcp")
+        for name in ("server.py", "calls.py"):
+            for node in ast.walk(ast.parse(open(os.path.join(src_dir, name)).read())):
+                if isinstance(node, ast.Dict):
+                    keys = [k.value for k in node.keys if isinstance(k, ast.Constant)]
+                    if "found" in keys and any(isinstance(v, ast.Constant) and v.value is False
+                                               for k, v in zip(node.keys, node.values) if isinstance(k, ast.Constant) and k.value == "found"):
+                        self.assertIn("error", keys, f"{name}:{node.lineno} answers found: false without an error code")
+
+
+class Outages(Base):
+    def test_timeout_answers_unavailable_without_internals(self):
+        def slow(request):
+            raise httpx.ReadTimeout("timed out", request=request)
+        catalogue._client = httpx.Client(transport=httpx.MockTransport(slow))
+        r = server.search_records("x")
+        self.assertEqual((r["found"], r["error"]), (False, "unavailable"))
+        self.assertNotIn("timed out", json.dumps(r))
+
+    def test_catalogue_down_then_back(self):
+        state = {"up": False}
+        def flaky(request):
+            if not state["up"]:
+                raise httpx.ConnectError("refused", request=request)
+            return httpx.Response(200, json={"data": {"total": 1, "results": [{"slug": "s", "title": "T"}]}})
+        catalogue._client = httpx.Client(transport=httpx.MockTransport(flaky))
+        self.assertEqual(server.search_records("x")["error"], "unavailable")
+        state["up"] = True
+        self.assertEqual(server.search_records("x")["results"][0]["slug"], "s")  # no restart, no stuck state
+
+
+class Concurrency(unittest.TestCase):
+    def test_hourly_limit_holds_under_simultaneous_proposals(self):
+        import threading
+        results, lock = [], threading.Lock()
+        def spend():
+            try:
+                calls._budget("concurrent-key", 1)
+                ok = True
+            except catalogue.Refused:
+                ok = False
+            with lock:
+                results.append(ok)
+        threads = [threading.Thread(target=spend) for _ in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(results.count(True), int(os.environ["GLAM_PROPOSAL_CAP"]))  # exactly the cap, never more
+        self.assertEqual(results.count(False), 20 - int(os.environ["GLAM_PROPOSAL_CAP"]))
+
+
+WS = "workspace.example.org"
+
+
+class OpenRiCWorkspace(Base):
+    """OpenRiC Workspace: UUID keys, IRIs from autocomplete, creators and children inside the record."""
+
+    def setUp(self):
+        super().setUp()
+        self.ws = settings.Catalogue("Workspace", f"https://{WS}", f"https://{WS}/api/ric/v1", "openric", "", "X-API-Key")
+        settings.CATALOGUES = {"Home": settings.HOME, "Workspace": self.ws}
+        uid, kid = "01a15b79-693f-7204", "01a15b79-6a03-73df"
+        self.cat.json("GET", f"{WS}/api/ric/v1/autocomplete", [
+            {"id": f"https://{WS}/record/{uid}", "@id": f"https://{WS}/record/{uid}", "label": "Rock shelter survey", "type": "Record"},
+            {"id": f"https://{WS}/repository/x", "label": "The British Museum", "type": "Repository"}])
+        self.cat.json("GET", f"{WS}/api/ric/v1/records/{uid}", {
+            "@id": f"https://{WS}/record/{uid}", "@type": "rico:RecordSet", "rico:title": "Rock shelter survey",
+            "rico:identifier": "RSS-1", "rico:scopeAndContent": "Survey notes.",
+            "rico:hasCreator": [{"@id": f"https://{WS}/agent/a1", "@type": "rico:Person", "rico:name": "Heinrich Mueller"}],
+            "rico:includesOrIncluded": [{"@id": f"https://{WS}/record/{kid}", "@type": "rico:Record", "rico:name": "Panel 6"}]})
+
+    def test_search_uses_the_uuid_and_the_records_own_page(self):
+        r = server.search_records("rock", catalogue="Workspace")
+        self.assertEqual([(h["slug"], h["url"]) for h in r["results"]], [("01a15b79-693f-7204", f"https://{WS}/record/01a15b79-693f-7204")])
+
+    def test_inline_creators_and_children(self):
+        r = server.get_record("01a15b79-693f-7204", catalogue="Workspace")
+        self.assertEqual((r["title"], r["names"]), ("Rock shelter survey", ["Heinrich Mueller"]))
+        kids = server.get_children("01a15b79-693f-7204", catalogue="Workspace")["results"]
+        self.assertEqual(kids, [{"slug": "01a15b79-6a03-73df", "title": "Panel 6", "level": "Record", "url": f"https://{WS}/record/01a15b79-6a03-73df"}])
+        self.assertFalse([q for q in self.cat.seen if "/relations-for/" in q.url.path or "/hierarchy/" in q.url.path])

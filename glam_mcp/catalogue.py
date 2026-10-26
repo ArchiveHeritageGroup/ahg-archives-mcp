@@ -47,9 +47,10 @@ class NotVisible(Exception):
 
 
 class Refused(Exception):
-    def __init__(self, message: str):
+    """The catalogue (or this service) said no. code: refused, rate_limited or unsupported."""
+    def __init__(self, message: str, code: str = "refused"):
         super().__init__(message)
-        self.message = message
+        self.message, self.code = message, code
 
 
 def _off_network(r: httpx.Response) -> bool:
@@ -83,7 +84,7 @@ def _api(method: str, path: str, key: str | None = None, **kw) -> Any:
             message = body.get("message") or body.get("detail") or body.get("title") or "Not authorised"
         except Exception:
             message = "Not authorised"
-        raise Refused(message)
+        raise Refused(message, {429: "rate_limited", 501: "unsupported"}.get(r.status_code, "refused"))
     r.raise_for_status()
     body = r.json()
     return body.get("data", body) if isinstance(body, dict) and "data" in body else body
@@ -250,10 +251,19 @@ def _ric_ref(at_id: str | None) -> str | None:
 def ric_search(query: str, n: int, s: int, types: str = "Record") -> list[dict]:
     """Title search through OpenRiC's autocomplete (it has no full-text search
     and no paging, so skip is applied here). Each hit: id, label, type."""
-    plural = ",".join(t.lower() + "s" for t in types.split(","))  # Record -> records
-    hits = _api("GET", "/autocomplete", params={"q": query, "types": plural, "limit": min(s + n, 50)})
+    # Singular, lower case ("record"): the reference service takes either form,
+    # OpenRiC Workspace only this one. Results are filtered here as well.
+    wanted = ",".join(t.lower() for t in types.split(","))
+    hits = _api("GET", "/autocomplete", params={"q": query, "types": wanted, "limit": min(s + n, 50)})
     hits = hits if isinstance(hits, list) else []
-    return [h for h in hits if h.get("type") in types.split(",")][s:s + n]
+    out = []
+    for h in hits:
+        if h.get("type") in types.split(","):
+            # The reference service answers numeric ids; Workspace answers full IRIs.
+            if str(h.get("id", "")).startswith("http"):
+                h = {**h, "url": h["id"], "id": _ric_ref(h["id"])}
+            out.append(h)
+    return out[s:s + n]
 
 
 def _ric_dates(d: dict) -> list[dict]:
@@ -270,14 +280,14 @@ def _ric_dates(d: dict) -> list[dict]:
     return out
 
 
-def _read_openric(slug: str, key: str | None) -> dict:
-    d = _api("GET", f"/records/{slug}", key)
+def _read_openric(slug: str, key: str | None, d: dict | None = None) -> dict:
+    d = d if d is not None else _api("GET", f"/records/{slug}", key)
     rid = slug if str(slug).isdigit() else None
-    names, places = [], []
+    names, places = _ric_labels(d.get("rico:hasCreator")), []
     if rid:  # related agents and places are read by numeric id only
         rel = _api("GET", f"/relations-for/{rid}", key)
-        names = sorted({r["target_name"] for r in (rel.get("outgoing") or []) + (rel.get("incoming") or [])
-                        if r.get("target_type") == "Agent" and r.get("target_name")})
+        names = sorted(set(names) | {r["target_name"] for r in (rel.get("outgoing") or []) + (rel.get("incoming") or [])
+                                     if r.get("target_type") == "Agent" and r.get("target_name")})
         ents = _api("GET", f"/records/{rid}/entities", key, params={"types": "places"})
         places = _ric_labels(ents.get("places") if isinstance(ents, dict) else None)
     holder = d.get("rico:hasOrHadHolder")
@@ -286,7 +296,7 @@ def _read_openric(slug: str, key: str | None) -> dict:
         "title": _ric_label(d.get("rico:title")), "reference_code": _ric_label(d.get("rico:identifier")),
         "level": _ric_label(d.get("rico:type")) or str(d.get("@type", "")).rsplit("#", 1)[-1],
         "dates": _ric_dates(d) or None,
-        "extent": None, "scope_and_content": _ric_label(d.get("rico:scopeAndContent")),
+        "extent": _ric_label(d.get("rico:hasExtent")), "scope_and_content": _ric_label(d.get("rico:scopeAndContent")),
         "archival_history": _ric_label(d.get("rico:history")), "names": names,
         "subjects": _ric_labels(d.get("rico:hasOrHadSubject")) or None, "places": places or None, "notes": None,
         "repository": _ric_label(holder), "part_of": [], "children_count": None, "images": [],
@@ -295,9 +305,15 @@ def _read_openric(slug: str, key: str | None) -> dict:
 
 def ric_children(slug: str, key: str | None) -> tuple[dict, list[dict]]:
     """The record and the records directly below it, from OpenRiC's hierarchy walk."""
-    rec = _read_openric(slug, key)
+    d = _api("GET", f"/records/{slug}", key)
+    rec = _read_openric(slug, key, d)
     if not str(slug).isdigit():
-        return rec, []
+        # Workspace: children are in the record itself (rico:includesOrIncluded).
+        items = d.get("rico:includesOrIncluded") or []
+        items = items if isinstance(items, list) else [items]
+        return rec, [{"slug": _ric_ref(c.get("@id")), "title": _ric_label(c.get("rico:name") or c.get("rico:title")),
+                      "level": str(c.get("@type", "")).rsplit(":", 1)[-1], "url": c.get("@id")}
+                     for c in items if isinstance(c, dict) and c.get("@id")]
     tree = _api("GET", f"/hierarchy/{slug}", key, params={"include": "children"})
     kids = []
     for c in (tree.get("children") or []) if isinstance(tree, dict) else []:

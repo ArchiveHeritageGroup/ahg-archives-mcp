@@ -79,7 +79,7 @@ def _read_key(ctx: Context | None, catalogue: str) -> str | None:
 
 
 def _unknown_catalogue(name: str) -> dict:
-    return {"found": False, "message": f"No catalogue called {name!r} here. Catalogues: " + ", ".join(_catalogues()) + ".", "source": HOME.name}
+    return {"found": False, "error": "unknown_catalogue", "message": f"No catalogue called {name!r} here. Catalogues: " + ", ".join(_catalogues()) + ".", "source": HOME.name}
 
 
 def _logged(tool: str, args: dict, ctx: Context | None, fn):
@@ -97,16 +97,16 @@ def _logged(tool: str, args: dict, ctx: Context | None, fn):
         return result
     except NotVisible:
         outcome = "not_found"
-        return {"found": False, "message": "No visible record with that reference.", "source": _c.name}
+        return {"found": False, "error": "not_found", "message": "No visible record with that reference.", "source": _c.name}
     except NeedsCallerKey:
         outcome = "needs_key"
-        return {"found": False, "message": "Proposing changes needs you to be signed in. Connect to " + (SIGNED_IN_URL or "this catalogue's signed-in MCP address") + " and sign in with your catalogue API key; the public read-only address cannot propose.", "source": _c.name}
+        return {"found": False, "error": "needs_sign_in", "message": "Proposing changes needs you to be signed in. Connect to " + (SIGNED_IN_URL or "this catalogue's signed-in MCP address") + " and sign in with your catalogue API key; the public read-only address cannot propose.", "source": _c.name}
     except Refused as e:
         outcome = "refused"
-        return {"found": False, "message": e.message, "source": _c.name}
+        return {"found": False, "error": e.code, "message": e.message, "source": _c.name}
     except Exception as e:  # never show the caller internals
         outcome = "error:" + type(e).__name__
-        return {"found": False, "message": "The catalogue could not be reached. Try again later.", "source": _c.name}
+        return {"found": False, "error": "unavailable", "message": "The catalogue could not be reached. Try again later.", "source": _c.name}
     finally:
         log.info(json.dumps({
             "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "tool": tool, "args": _safe_args(args), "caller": "own-key" if (ck := _caller_key(ctx)) else "public",
@@ -151,7 +151,7 @@ def _budget(key: str, n: int = 0) -> int:
         used, first = _cap_db.execute("SELECT COUNT(*), MIN(ts) FROM spent WHERE key = ?", (k,)).fetchone()
         if n and used + n > PROPOSAL_CAP:
             wait = int(first + 3600 - now) // 60 + 1 if first else 60
-            raise Refused(f"At most {PROPOSAL_CAP} proposals an hour per person; {PROPOSAL_CAP - used} left. "
+            raise Refused(code="rate_limited", message=f"At most {PROPOSAL_CAP} proposals an hour per person; {PROPOSAL_CAP - used} left. "
                           f"Try again in about {wait} minutes, or propose fewer at once.")
         _cap_db.executemany("INSERT INTO spent (key, ts) VALUES (?, ?)", [(k, now)] * n)
         return PROPOSAL_CAP - used - n

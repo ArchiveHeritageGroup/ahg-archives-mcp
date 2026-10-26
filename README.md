@@ -35,6 +35,8 @@ The quick-start guide (`docs/AHG_Archives_MCP_Quick_Start.md`) covers connecting
 
 Every read tool takes an optional `catalogue` (a name from `list_catalogues`); empty means the home catalogue. Proposals always go to the home catalogue.
 
+A failure always answers `found: false` with a `message` for people and an `error` code for programs: `not_found`, `refused`, `rate_limited`, `unsupported`, `unavailable`, `needs_sign_in`, `unknown_catalogue` or `no_image`.
+
 What a caller sees follows AtoM's own permissions: unpublished records, hidden children and master files stay hidden from callers who could not see them in AtoM. `tests/no_leak.py` checks this against a live catalogue.
 
 ## Security
@@ -71,7 +73,7 @@ The server finds out which of these a catalogue has when it starts (`GLAM_BACKEN
 
 - **`atom-ahg`**: AtoM with the AHG Extensions, through REST API v2 (`ahgAPIPlugin`). Needs atom-ahg-plugins v3.121.63 or later for `propose_transcription` and `propose_translation`, v3.121.62 for `propose_relationships`, v3.121.61 for `list_my_proposals`, v3.121.60 for `search_authorities` and `existing_id`, v3.121.45 for authority details on proposals (v3.121.43 for the rest). Proposals are queued in AI > NER review and AI > Suggest review for an archivist; with the Authority Resolution plugin they also reach its queue.
 - **Heratio**: served by the `atom-ahg` backend unchanged (Heratio v1.160.0 to v1.163.0, on heratio-dev; checked there with all 17 tools and the leak test, 60 hidden records including embargo, classification and ICIP, 299 checks). Heratio's reads are visitor-level for every key, staff included, so a proposal on a draft answers "not found".
-- **`openric`**: OpenRiC's RiC-O JSON-LD API (`/api/ric/v1`), read only. Records, agents, places and relations; search by title (OpenRiC has no full-text search); no file text, images or review queue, so proposals come back for a person to apply. Detected before the AHG API, which OpenRiC also carries a copy of. OpenRiC shows published records only since its v0.17.26; the leak test against it still needs read access to its database.
+- **`openric`**: OpenRiC's RiC-O JSON-LD API (`/api/ric/v1`), read only; serves both the OpenRiC reference service and OpenRiC Workspace (UUID keys, creators and children inside each record). Records, agents, places and relations; search by title (OpenRiC has no full-text search); no file text, images or review queue, so proposals come back for a person to apply. Detected before the AHG API, which OpenRiC also carries a copy of. OpenRiC shows published records only since its v0.17.26; the leak test against it still needs read access to its database.
 - **`atom-base`**: stock AtoM, through its own REST API (`arRestApiPlugin`), tested on AtoM 2.10.2. Search, records, children and `work_through_series` work; authority records, IIIF manifests and file text are not offered by the stock API and say so. Proposals are not saved: the stock write API overwrites rather than adds. Instead, names and places come back as a one-row CSV for AtoM's own **Import > CSV** (type *Archival description*, update behaviour *Update matches ignoring blank fields in CSV*, tick *Skip unmatched records*), which adds them to the record and leaves the rest as it is. Dates are listed for entry by hand, because an import replaces the record's dates. AtoM matches the file on the record's identifier, title and repository, so a record without a repository cannot be updated this way.
 
 ### Stock AtoM: setting up
@@ -141,6 +143,12 @@ A catalogue that cannot be reached at start-up is left out with a warning. Each 
 
 To run the no-leak test through a second catalogue, set `TEST_CATALOGUE` to its name.
 
+## Running it
+
+`docs/OPERATIONS.md`: update, back up and restore (`hosting/backup.sh`), roll back, and watch (`hosting/healthcheck.sh`, a Workbench notification when a service stops answering). `SECURITY.md`: how to report a security problem.
+
+Tools run in worker threads, so one slow catalogue does not hold other callers up. Load test (`tests/load_test.py`, against a test catalogue, 26 Oct 2026): 25 clients at once, 40 calls a second, no errors, median record read 0.6 s, memory under 60 MB.
+
 ## Ready-made image
 
 Each version tag (`v0.4.0` and on) runs the no-leak tests and then publishes `ghcr.io/archiveheritagegroup/ahg-archives-mcp`, tagged with the version and `latest` (`.github/workflows/image.yml`). Pin a version in production.
@@ -154,7 +162,7 @@ Each version tag (`v0.4.0` and on) runs the no-leak tests and then publishes `gh
     hosting/client.sh publish <client>    # nginx site and certificate (sudo), once DNS resolves and a leak test is recorded
     hosting/client.sh check <client>      # health, and the key check again
     hosting/client.sh list
-    hosting/client.sh remove <client>     # stops it, deletes key and secret, keeps the logs
+    hosting/client.sh remove <client>     # stops it and deletes its key, secret, data and logs
 
 The host defaults to `<client>.mcp.theahg.co.za`, ports are taken from 8041 up, and each client's settings live in `clients/<client>/.env` (mode 600, not in git). `GLAM_IMAGE` picks the image.
 
@@ -181,6 +189,7 @@ The signed-in service serves a staff page at `/usage`: calls per day, per tool, 
 
 ## Versions
 
+- **v0.7.0** (26 Oct 2026): evidence release, second part. Tools run in worker threads (3 times the throughput under load); an `error` code on every failure; OpenRiC Workspace through the openric adapter; dependency scan and SBOM in CI (pip upgraded in the image); `SECURITY.md`; `docs/OPERATIONS.md` with backup, restore, rollback and health alerts, each tried once; `list_catalogues` logged; hosted clients removed completely on leaving. 52 unit tests.
 - **v0.6.1** (26 Oct 2026): OpenRiC adapter for OpenRiC v0.17.27, which shows published records only: dates from its date ranges, children from its hierarchy, typed title search, key check through its API. Checked locally against ric.theahg.co.za.
 - **v0.6.0** (26 Oct 2026): evidence release. Stock AtoM fields only from the public page (no field from the API); OpenRiC adapter (read only); one table of backends; Heratio served by `atom-ahg`; key check follows same-host redirects; leak test covers Heratio's embargo table, classification above PUBLIC, inherited restrictions, and samples each kind of hidden record; a unit test proves no write path besides the review queue. 45 unit tests.
 - **v0.5.2** (26 Oct 2026): after a second review. Stock AtoM fields matched as whole values under their own heading only; demo catalogues checked against the address actually connected to (DNS rebinding); the signed-in service requires a writable data folder; `/healthz` tells unreachable, key refused and not working apart; hosted clients need a recorded leak test before going public. 39 unit tests.

@@ -4,7 +4,8 @@ FROM python:3.12-slim
 # variables at run time, never in the image.
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# The base image's pip has known vulnerabilities (pip-audit, 26 Oct 2026); upgrade it first.
+RUN pip install --no-cache-dir --upgrade pip && pip install --no-cache-dir -r requirements.txt
 COPY glam_mcp ./glam_mcp
 
 RUN useradd --system --uid 10001 glam
