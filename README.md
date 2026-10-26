@@ -46,7 +46,19 @@ What a caller sees follows AtoM's own permissions: unpublished records, hidden c
 - **Limits:** each catalogue key has its own hourly limit, and may have a daily cap and an end date (set in the catalogue); each signed-in person may queue at most `GLAM_PROPOSAL_CAP` proposal items an hour, kept on disk.
 - **Logs** keep the tool, catalogue and outcome, but free text (search words, names, proposed text) only as its length and a short hash; owner-only files, deleted after `GLAM_LOG_DAYS` (90). Sign-in tokens are stored as hashes and catalogue keys encrypted.
 
-An independent source review (26 October 2026) shaped v0.5.0. Still open from it: a full test of sign-in through a real browser, and the stock AtoM field filter is by text match on the public page, so staff with their own key also see visitor fields only on stock AtoM.
+An independent source review (26 October 2026) shaped v0.5.0. Sign-in through a real browser has its own test (`tests/SIGNIN_TEST.md`, about 10 minutes, then `tests/signin_check.py`); its first run is pending. Still open: the stock AtoM field filter is by text match on the public page, so staff with their own key also see visitor fields only on stock AtoM.
+
+## Code layout
+
+| File | What it holds |
+| --- | --- |
+| `glam_mcp/server.py` | The MCP layer: tools, sign-in and web routes, start-up. |
+| `glam_mcp/catalogue.py` | Catalogue adapters: everything that talks to a catalogue (reads for both backends, stock AtoM visibility and fields, images, the stock CSV). A new backend, such as Heratio, goes here. |
+| `glam_mcp/calls.py` | Per-call policy: whose key a call uses, the hourly proposal limit, the call log line. |
+| `glam_mcp/settings.py` | Settings, the call log, and the catalogues (home, configured, demo). |
+| `glam_mcp/keycheck.py` | Backend detection, the service-key check, the public-address check. |
+| `glam_mcp/auth.py` | OAuth sign-in. |
+| `glam_mcp/usage.py`, `glam_mcp/catalogues.py` | The staff pages `/usage` and `/catalogues`. |
 
 ## Backends
 
@@ -162,6 +174,7 @@ The signed-in service serves a staff page at `/usage`: calls per day, per tool, 
 
 ## Versions
 
+- **Next:** `server.py` split into the MCP layer, catalogue adapters, per-call policy and settings (no change in behaviour); sign-in test through a real browser (`tests/SIGNIN_TEST.md`, `tests/signin_check.py`).
 - **v0.5.0** (26 Oct 2026): security and reliability release after an independent source review. Image fetching bound to the catalogue's own host; service-key check at start-up; stock AtoM fields only as the public page shows them; logs without free text, rotated and deleted after 90 days; hourly proposal limit kept on disk; unit tests (fake catalogue) in CI.
 - **v0.4.0** (26 Oct 2026): several catalogues (`list_catalogues`, `catalogue` on every read tool, search across all), demo catalogues page, staff usage page, hosted clients (`hosting/client.sh`), ready-made image, key check.
 

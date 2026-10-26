@@ -21,7 +21,7 @@ os.environ.update({
     "GLAM_PROPOSAL_CAP": "5",
 })
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from glam_mcp import keycheck, server  # noqa: E402
+from glam_mcp import calls, catalogue, keycheck, server, settings  # noqa: E402
 
 HOME = "https://cat.example.org"
 PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 100
@@ -46,10 +46,10 @@ class FakeCatalogue:
 class Base(unittest.TestCase):
     def setUp(self):
         self.cat = FakeCatalogue()
-        server._client = httpx.Client(transport=httpx.MockTransport(self.cat), headers={"Accept": "application/json"})
+        catalogue._client = httpx.Client(transport=httpx.MockTransport(self.cat), headers={"Accept": "application/json"})
         self._real_client = keycheck.httpx.Client
         keycheck.httpx.Client = functools.partial(httpx.Client, transport=httpx.MockTransport(self.cat))
-        server.CATALOGUES = {"Home": server.HOME}
+        settings.CATALOGUES = {"Home": settings.HOME}
 
     def tearDown(self):
         keycheck.httpx.Client = self._real_client
@@ -83,8 +83,8 @@ class Reads(Base):
 class Catalogues(Base):
     def setUp(self):
         super().setUp()
-        other = server.Catalogue("Other", "https://other.example.net", "https://other.example.net/api/v2", "atom-ahg", "other-svc", "X-API-Key")
-        server.CATALOGUES = {"Home": server.HOME, "Other": other}
+        other = settings.Catalogue("Other", "https://other.example.net", "https://other.example.net/api/v2", "atom-ahg", "other-svc", "X-API-Key")
+        settings.CATALOGUES = {"Home": settings.HOME, "Other": other}
 
     def test_unknown_catalogue(self):
         r = server.get_record("x", catalogue="Nope")
@@ -98,12 +98,12 @@ class Catalogues(Base):
         self.assertEqual(r["catalogues"][1]["results"][0]["url"], "https://other.example.net/s")
 
     def test_other_catalogue_gets_its_own_key_never_the_callers(self):
-        server._caller_key, real = (lambda ctx: "callers-own-key"), server._caller_key
+        calls._caller_key, real = (lambda ctx: "callers-own-key"), calls._caller_key
         try:
             self.cat.json("GET", "other.example.net/api/v2/descriptions/s", {"title": "T"})
             server.get_record("s", catalogue="Other")
         finally:
-            server._caller_key = real
+            calls._caller_key = real
         sent = [r.headers.get("X-API-Key") for r in self.cat.seen if r.url.host == "other.example.net"]
         self.assertEqual(sent, ["other-svc"])
 
@@ -111,50 +111,50 @@ class Catalogues(Base):
 class Images(Base):
     def test_file_links_must_be_plain_paths(self):
         for bad in ("https://evil.example/x.jpg", "//evil.example/x.jpg", "@evil.example/x.jpg", "/x@evil/y", "x.jpg", "/a\\b", None):
-            self.assertIsNone(server._file_url(bad), bad)
-        self.assertEqual(server._file_url("/uploads/r/x.jpg"), f"{HOME}/uploads/r/x.jpg")
+            self.assertIsNone(catalogue._file_url(bad), bad)
+        self.assertEqual(catalogue._file_url("/uploads/r/x.jpg"), f"{HOME}/uploads/r/x.jpg")
 
     def _img(self, status=200, ctype="image/png", body=PNG, headers=None):
         self.cat.routes[("GET", "cat.example.org/uploads/x.png")] = httpx.Response(status, content=body, headers={"content-type": ctype, **(headers or {})})
 
     def test_other_host_is_not_fetched(self):
-        with self.assertRaises(server.ImageRefused) as e:
-            server._fetch_image("https://evil.example/x.png")
+        with self.assertRaises(catalogue.ImageRefused) as e:
+            catalogue._fetch_image("https://evil.example/x.png")
         self.assertEqual(e.exception.outcome, "off_site")
         self.assertEqual(self.cat.seen, [])
 
     def test_image_types_only(self):
         self._img(ctype="text/html", body=b"<html>")
-        with self.assertRaises(server.ImageRefused) as e:
-            server._fetch_image(f"{HOME}/uploads/x.png")
+        with self.assertRaises(catalogue.ImageRefused) as e:
+            catalogue._fetch_image(f"{HOME}/uploads/x.png")
         self.assertEqual(e.exception.outcome, "not_image")
 
     def test_redirects_are_not_followed(self):
         self._img(status=302, headers={"location": "http://169.254.169.254/"})
-        with self.assertRaises(server.ImageRefused):
-            server._fetch_image(f"{HOME}/uploads/x.png")
+        with self.assertRaises(catalogue.ImageRefused):
+            catalogue._fetch_image(f"{HOME}/uploads/x.png")
         self.assertEqual(len(self.cat.seen), 1)
 
     def test_stops_at_the_size_limit(self):
-        self._img(body=b"0" * (server.MAX_IMAGE_BYTES + 1))
-        with self.assertRaises(server.ImageRefused) as e:
-            server._fetch_image(f"{HOME}/uploads/x.png")
+        self._img(body=b"0" * (catalogue.MAX_IMAGE_BYTES + 1))
+        with self.assertRaises(catalogue.ImageRefused) as e:
+            catalogue._fetch_image(f"{HOME}/uploads/x.png")
         self.assertEqual(e.exception.outcome, "too_large")
 
     def test_good_image(self):
         self._img()
-        data, fmt = server._fetch_image(f"{HOME}/uploads/x.png")
+        data, fmt = catalogue._fetch_image(f"{HOME}/uploads/x.png")
         self.assertEqual((data, fmt), (PNG, "png"))
 
 
 class StockFields(unittest.TestCase):
     def test_only_fields_the_page_shows(self):
         page = "Published letter Letter from Jan Pretorius to his sister Anna Pretoria Jan Pretorius 1902-05-03"
-        self.assertEqual(server._shown("Letter from Jan Pretorius to his sister Anna", page), "Letter from Jan Pretorius to his sister Anna")
-        self.assertIsNone(server._shown("Archivist's note: donor asked for this to stay private", page))
-        self.assertEqual(server._shown(["Pretoria", "Secret place"], page), ["Pretoria"])
-        self.assertEqual(server._shown([{"date": "1902-05-03", "type": "Creation"}], page), [{"date": "1902-05-03", "type": "Creation"}])
-        self.assertIsNone(server._shown([], page))
+        self.assertEqual(catalogue._shown("Letter from Jan Pretorius to his sister Anna", page), "Letter from Jan Pretorius to his sister Anna")
+        self.assertIsNone(catalogue._shown("Archivist's note: donor asked for this to stay private", page))
+        self.assertEqual(catalogue._shown(["Pretoria", "Secret place"], page), ["Pretoria"])
+        self.assertEqual(catalogue._shown([{"date": "1902-05-03", "type": "Creation"}], page), [{"date": "1902-05-03", "type": "Creation"}])
+        self.assertIsNone(catalogue._shown([], page))
 
 
 class Proposals(Base):
@@ -164,15 +164,15 @@ class Proposals(Base):
         self.assertEqual([q for q in self.cat.seen if q.method == "POST"], [])
 
     def test_hourly_cap_is_kept_on_disk(self):
-        self.assertEqual(server._budget("k1", 3), 2)
+        self.assertEqual(calls._budget("k1", 3), 2)
         # A second connection to the same file, as after a restart.
         import sqlite3
         db = sqlite3.connect(os.path.join(TMP, "proposal-cap.db"))
         self.assertEqual(db.execute("SELECT COUNT(*) FROM spent").fetchone()[0], 3)
-        with self.assertRaises(server.Refused):
-            server._budget("k1", 3)
-        self.assertEqual(server._budget("k1"), 2)  # a refusal spends nothing
-        self.assertEqual(server._budget("k2", 5), 0)  # each key has its own hour
+        with self.assertRaises(catalogue.Refused):
+            calls._budget("k1", 3)
+        self.assertEqual(calls._budget("k1"), 2)  # a refusal spends nothing
+        self.assertEqual(calls._budget("k2", 5), 0)  # each key has its own hour
 
 
 class KeyCheck(Base):

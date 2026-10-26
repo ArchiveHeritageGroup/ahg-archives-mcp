@@ -29,9 +29,8 @@ default, auto, asks the catalogue which API it has):
              archivist approves them into access points and dates.
   atom-base  Stock AtoM. Reads through AtoM's own REST API (arRestApiPlugin).
              Its write API overwrites rather than adds (one creator, one date),
-             so proposals are returned for the archivist to apply; nothing is
-             written. ponytail: an AtoM CSV for the import screen comes once its
-             update mode is checked on a stock AtoM test site.
+             so names and places come back as a one-row CSV for AtoM's own
+             import screen; nothing is written.
 
 Every read runs with a key whose owner the catalogue's own rules apply to. With
 no caller key that is the public service key (a user with no groups), so only
@@ -41,100 +40,66 @@ permissions. Proposals always need a caller key.
 
 Every result carries the record's public URL and source, so an assistant can
 cite it. Every tool call is logged as one JSON line.
+
+This module is the MCP layer: the tools, sign-in and the web routes. The rest:
+  settings.py    settings, the call log, the catalogues and the current one (_c)
+  catalogue.py   adapters: everything that talks to a catalogue
+  calls.py       per-call policy: keys, the hourly proposal limit, the call log line
+  keycheck.py    backend detection, the service-key check, public-address check
+  auth.py        OAuth sign-in store and provider
+  usage.py, catalogues.py   the staff pages /usage and /catalogues
 """
 
-import csv
-import hashlib
-import io
+
 import json
-import logging
-import html
 import os
-import re
-import sqlite3
-import threading
 import time
 from collections import defaultdict
-from contextvars import ContextVar
-from dataclasses import dataclass
 from typing import Any, Literal
 
-import httpx
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.utilities.types import Image
 from pydantic import BaseModel, Field
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from glam_mcp.keycheck import check as keycheck, detect_backend as _detect_backend, not_public as _not_public
-
-def _setting(name: str, old: str = "", default: str | None = None) -> str:
-    """A setting by its name, or by the name it had before (PSIS_*/GLAM_*). With
-    no default it is required: an install that forgets it must not quietly use
-    another catalogue's address."""
-    value = os.environ.get(name) or (os.environ.get(old) if old else None) or default
-    if value is None:
-        raise SystemExit(f"{name} is required (see README, Install for your own catalogue)")
-    return value
-
-
-PUBLIC_BASE = _setting("CATALOGUE_URL", "PSIS_PUBLIC_BASE").rstrip("/")
-API_KEY = _setting("CATALOGUE_API_KEY", "PSIS_API_KEY", "")
-BACKEND = os.environ.get("GLAM_BACKEND", "auto")
-if BACKEND == "auto":
-    BACKEND = _detect_backend(PUBLIC_BASE, API_KEY)
-API_BASE = _setting("CATALOGUE_API_URL", "PSIS_API_BASE", PUBLIC_BASE + ("/api/v2" if BACKEND == "atom-ahg" else "/api")).rstrip("/")
-SOURCE = _setting("CATALOGUE_NAME", "GLAM_SOURCE_LABEL")
-CALL_LOG = os.environ.get("GLAM_CALL_LOG", "")  # file path; empty means stdout
-MAX_LIMIT = 25
-# Proposal items one signed-in key may queue per hour (names, places, dates,
-# relationships, texts), so one session cannot flood the review queues.
-# Kept in GLAM_DATA/proposal-cap.db; the catalogue's own per-key hourly and
-# daily limits (plugins #223) apply on top.
-PROPOSAL_CAP = int(os.environ.get("GLAM_PROPOSAL_CAP", "200"))
-ENTITY_TYPES = {"person": "PERSON", "organisation": "ORG", "place": "GPE", "date": "DATE"}
-
-if BACKEND not in ("atom-ahg", "atom-base"):
-    raise SystemExit(f"GLAM_BACKEND must be auto, atom-ahg or atom-base, not {BACKEND!r}")
-
-# Files this service writes (logs, sign-in store, limits) are for its own user only.
-os.umask(0o077)
-LOG_DAYS = int(os.environ.get("GLAM_LOG_DAYS", "90"))
-log = logging.getLogger("glam-mcp.calls")
-log.setLevel(logging.INFO)
-log.propagate = False  # only to its own file, never also to the container's output
-# httpx logs every request address, search words included; Docker keeps that output.
-logging.getLogger("httpx").setLevel(logging.WARNING)
-if CALL_LOG:
-    # One file a day, kept LOG_DAYS days, then deleted (calls.jsonl.2026-10-26 ...).
-    import logging.handlers
-    log.addHandler(logging.handlers.TimedRotatingFileHandler(CALL_LOG, when="midnight", backupCount=LOG_DAYS, utc=True))
-    os.chmod(CALL_LOG, 0o600)
-else:
-    log.addHandler(logging.StreamHandler())
-
-# Free text a caller typed (search words, names, proposed text) is not kept:
-# only its length and a short hash, enough to count repeats.
-_FREE_TEXT = {"query", "name", "text", "value", "evidence", "notes"}
+from glam_mcp import calls
+from glam_mcp import catalogue as adapters
+from glam_mcp.calls import _budget, _caller_key, _logged, _needs_key, _read_key, _unknown_catalogue
+from glam_mcp.catalogue import (
+    _api,
+    _fetch_image,
+    _import_csv,
+    _read_ahg,
+    _read_base,
+    _url,
+    _visitor_sees,
+    ImageRefused,
+    NotVisible,
+)
+from glam_mcp.keycheck import check as keycheck, detect_backend as _detect_backend
+from glam_mcp.settings import (
+    _c,
+    _catalogues,
+    _current,
+    _setting,
+    API_BASE,
+    AUTH_MODE,
+    BACKEND,
+    CALL_LOG,
+    CATALOGUES,
+    ENTITY_TYPES,
+    HOME,
+    HTTP_PATH,
+    log,
+    MAX_LIMIT,
+    MCP_BASE,
+    PUBLIC_BASE,
+    SOURCE,
+    USER_AGENT,
+)
 
 
-def _safe_args(args: dict) -> dict:
-    out = {}
-    for k, v in args.items():
-        if isinstance(v, str) and (k in _FREE_TEXT or len(v) > 200):
-            out[k] = {"chars": len(v), "hash": hashlib.sha256(v.encode()).hexdigest()[:8]} if v else ""
-        else:
-            out[k] = v
-    return out
-
-# GLAM_AUTH=oauth: the signed-in service (browser assistants sign in, desktop
-# clients may send their catalogue key as a bearer). GLAM_AUTH=off: the public,
-# read-only service, which never uses a caller key.
-AUTH_MODE = os.environ.get("GLAM_AUTH", "off")
-MCP_BASE = _setting("MCP_PUBLIC_URL", "GLAM_PUBLIC_BASE", "" if AUTH_MODE == "off" else None).rstrip("/")
-HTTP_PATH = os.environ.get("GLAM_HTTP_PATH", "/mcp")
-# Where to send people who try to propose on the public, read-only service.
-SIGNED_IN_URL = _setting("MCP_SIGNED_IN_URL", default=(MCP_BASE + HTTP_PATH) if AUTH_MODE == "oauth" else "")
 _auth_kwargs: dict = {}
 _provider = None
 if AUTH_MODE == "oauth":
@@ -184,175 +149,11 @@ mcp = FastMCP(
     **_auth_kwargs,
 )
 
+calls._provider = _provider  # whose key a call uses (calls._caller_key)
+
 if _provider is not None:
     mcp.custom_route("/login", methods=["GET"])(_provider.login_get)
     mcp.custom_route("/login", methods=["POST"])(_provider.login_post)
-
-# PSIS's nginx drops requests from generic client user agents (bot protection),
-# so the service names itself.
-USER_AGENT = "AHG-GLAM-MCP/0.2 (+https://www.atom-extensions.com)"
-KEY_HEADER = "X-API-Key" if BACKEND == "atom-ahg" else "REST-API-Key"
-_client = httpx.Client(timeout=20.0, headers={"Accept": "application/json", "User-Agent": USER_AGENT})
-
-
-@dataclass(frozen=True)
-class Catalogue:
-    name: str
-    public_base: str
-    api_base: str
-    backend: str
-    key: str
-    key_header: str
-    home: bool = False
-    demo: bool = False
-
-
-def _other_catalogues() -> dict[str, Catalogue]:
-    """GLAM_OTHER_CATALOGUES: further catalogues to read and search, as a JSON list
-    of {"name", "url", "key", "backend"?}. They are read with their own service
-    key (give it a user with no groups, so only what a visitor sees comes back)
-    and never receive proposals or a caller's key; those stay with the home
-    catalogue. One that cannot be reached at start-up is left out, not fatal."""
-    out: dict[str, Catalogue] = {}
-    for c in json.loads(os.environ.get("GLAM_OTHER_CATALOGUES") or "[]"):
-        base = c["url"].rstrip("/")
-        try:
-            backend = c.get("backend") or _detect_backend(base, c.get("key", ""))
-        except SystemExit as e:
-            log.warning(json.dumps({"catalogue": c["name"], "skipped": str(e)}))
-            continue
-        if why := keycheck(base, c.get("key", ""), backend):
-            log.warning(json.dumps({"catalogue": c["name"], "skipped": why}))
-            continue
-        out[c["name"]] = Catalogue(c["name"], base, base + ("/api/v2" if backend == "atom-ahg" else "/api"), backend,
-                                   c.get("key", ""), "X-API-Key" if backend == "atom-ahg" else "REST-API-Key")
-    return out
-
-
-HOME = Catalogue(SOURCE, PUBLIC_BASE, API_BASE, BACKEND, API_KEY, KEY_HEADER, home=True)
-CATALOGUES = {HOME.name: HOME, **_other_catalogues()}
-
-
-def _catalogues() -> dict[str, Catalogue]:
-    """Home, configured, then demo catalogues added at /catalogues (read each call, so both services see them)."""
-    from glam_mcp import catalogues as demo
-    out = dict(CATALOGUES)
-    for d in demo.load():
-        out.setdefault(d["name"], Catalogue(d["name"], d["url"], d["url"] + ("/api/v2" if d["backend"] == "atom-ahg" else "/api"),
-                                            d["backend"], d.get("key", ""), "X-API-Key" if d["backend"] == "atom-ahg" else "REST-API-Key", demo=True))
-    return out
-_current: ContextVar[Catalogue] = ContextVar("catalogue", default=HOME)
-
-
-class _Current:
-    """The catalogue this tool call reads (the home one unless the caller chose another)."""
-    def __getattr__(self, name):
-        return getattr(_current.get(), name)
-
-
-_c = _Current()
-
-
-class NotVisible(Exception):
-    """The record does not exist or the caller may not see it. Both answer the same."""
-
-
-class NeedsCallerKey(Exception):
-    """A write was asked for without the archivist's own key."""
-
-
-class Refused(Exception):
-    def __init__(self, message: str):
-        super().__init__(message)
-        self.message = message
-
-
-def _caller_key(ctx: Context | None) -> str | None:
-    """The catalogue key of the signed-in user, or None on the public service.
-
-    The bearer has already been checked by the auth middleware: it is either one
-    of our OAuth tokens (mapped to the key the user gave at sign-in) or a
-    catalogue key sent directly by a desktop client.
-    """
-    if _provider is None or not _c.home:
-        return None
-    from mcp.server.auth.middleware.auth_context import get_access_token
-    return _provider.catalogue_key_for(get_access_token())
-
-
-def _read_key(ctx: Context | None, catalogue: str) -> str | None:
-    """The caller's key for reads in the home catalogue; other catalogues are read with their own service key."""
-    return _caller_key(ctx) if catalogue in ("", HOME.name) else None
-
-
-def _api(method: str, path: str, key: str | None = None, **kw) -> Any:
-    r = _client.request(method, _c.api_base + path, headers={_c.key_header: key or _c.key}, **kw)
-    if r.status_code == 404:
-        raise NotVisible()
-    # 501: the catalogue lacks what this needs (e.g. AHG API without the AI plugin's review queues).
-    # 429: the key's hourly or daily limit is used up (atom-ahg-plugins#223).
-    if r.status_code in (401, 403, 429, 501):
-        try:
-            message = r.json().get("message") or "Not authorised"
-        except Exception:
-            message = "Not authorised"
-        raise Refused(message)
-    r.raise_for_status()
-    body = r.json()
-    return body.get("data", body) if isinstance(body, dict) and "data" in body else body
-
-
-def _unknown_catalogue(name: str) -> dict:
-    return {"found": False, "message": f"No catalogue called {name!r} here. Catalogues: " + ", ".join(_catalogues()) + ".", "source": HOME.name}
-
-
-def _logged(tool: str, args: dict, ctx: Context | None, fn):
-    start = time.time()
-    outcome, count = "ok", None
-    name = args.get("catalogue") or HOME.name
-    cats = _catalogues()
-    if name not in cats:
-        return _unknown_catalogue(name)
-    token = _current.set(cats[name])
-    try:
-        result = fn()
-        if isinstance(result, dict) and isinstance(result.get("results"), list):
-            count = len(result["results"])
-        return result
-    except NotVisible:
-        outcome = "not_found"
-        return {"found": False, "message": "No visible record with that reference.", "source": _c.name}
-    except NeedsCallerKey:
-        outcome = "needs_key"
-        return {"found": False, "message": "Proposing changes needs you to be signed in. Connect to " + (SIGNED_IN_URL or "this catalogue's signed-in MCP address") + " and sign in with your catalogue API key; the public read-only address cannot propose.", "source": _c.name}
-    except Refused as e:
-        outcome = "refused"
-        return {"found": False, "message": e.message, "source": _c.name}
-    except Exception as e:  # never show the caller internals
-        outcome = "error:" + type(e).__name__
-        return {"found": False, "message": "The catalogue could not be reached. Try again later.", "source": _c.name}
-    finally:
-        log.info(json.dumps({
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "tool": tool, "args": _safe_args(args), "caller": "own-key" if (ck := _caller_key(ctx)) else "public",
-            # Tells one person's calls from another's for usage figures; reveals nothing of the key.
-            **({"key": hashlib.sha256(ck.encode()).hexdigest()[:8]} if ck else {}),
-            **({} if _c.home else {"catalogue": _c.name}),
-            "outcome": outcome, "results": count, "ms": int((time.time() - start) * 1000),
-        }))
-        _current.reset(token)
-
-
-def _url(slug: str) -> str:
-    return f"{_c.public_base}/{slug}"
-
-
-def _file_url(path: str | None) -> str | None:
-    """A file on the current catalogue's own site. Only a plain path is taken:
-    anything that could name another host (a full address, //host, user@host)
-    is dropped, whatever the catalogue's API returned."""
-    if not path or not path.startswith("/") or path.startswith("//") or "@" in path or "\\" in path:
-        return None
-    return _c.public_base + path
 
 
 def _limit(n: int) -> int:
@@ -401,104 +202,6 @@ def list_catalogues() -> dict:
                             "kind": "AtoM with AHG extensions" if c.backend == "atom-ahg" else "AtoM",
                             "proposals": c.home and AUTH_MODE == "oauth", **({"demo": True} if c.demo else {})}
                            for c in _catalogues().values()]}
-
-
-def _read_ahg(slug: str, key: str | None) -> dict:
-    d = _api("GET", f"/descriptions/{slug}", key, params={"full": "true"})
-    return {
-        "found": True, "source": _c.name, "url": _url(slug), "slug": slug,
-        "title": d.get("title"), "reference_code": d.get("identifier"), "level": d.get("level_of_description"),
-        "dates": d.get("dates"), "extent": d.get("extent_and_medium"), "scope_and_content": d.get("scope_and_content"),
-        "archival_history": d.get("archival_history"), "names": d.get("names"), "subjects": d.get("subjects"),
-        "places": d.get("places"), "notes": d.get("notes"),
-        "part_of": [{"title": a.get("title"), "url": _url(a["slug"])} for a in d.get("hierarchy", []) if a.get("slug")],
-        "children_count": d.get("children_count", 0),
-        "provenance": d.get("provenance"),
-        "images": [
-            {"thumbnail": _file_url(o.get("thumbnail_url")), "reference": _file_url(o.get("reference_url")),
-             "iiif_manifest": f"{_c.public_base}/iiif/manifest/{slug}"}
-            for o in d.get("digital_objects", []) if o.get("reference_url") or o.get("thumbnail_url")
-        ],
-    }
-
-
-_visible_cache: dict[tuple[str, str], tuple[float, bool]] = {}
-
-
-def _visitor_sees(slug: str) -> bool:
-    """Stock AtoM only: may a visitor open this record's page? Its REST API checks
-    only "read", never "view draft", so any key reads drafts (AtoM 2.10.2). The
-    public page applies the catalogue's own rules (drafts, other denials) in any
-    language, so a record counts as visible only when a visitor gets it.
-    Anything but 200 is hidden. Remembered for five minutes."""
-    now = time.time()
-    hit = _visible_cache.get((_c.public_base, slug))
-    if hit and hit[0] > now - 300:
-        return hit[1]
-    try:
-        ok = _client.get(f"{_c.public_base}/{slug}", headers={"Accept": "text/html"}, follow_redirects=False).status_code == 200
-    except httpx.HTTPError:
-        ok = False
-    if len(_visible_cache) > 5000:
-        _visible_cache.clear()
-    _visible_cache[(_c.public_base, slug)] = (now, ok)
-    return ok
-
-
-def _names_base(d: dict) -> list:
-    """Creators and name access points, as names."""
-    out = []
-    for n in (d.get("creators") or []) + (d.get("name_access_points") or []):
-        n = n.get("authorized_form_of_name") if isinstance(n, dict) else n
-        if n and n not in out:
-            out.append(n)
-    return out
-
-
-def _page_text(slug: str) -> str | None:
-    """Stock AtoM only: the record's public page as a visitor gets it, as plain
-    text (tags dropped, entities read, spaces collapsed); None when hidden."""
-    try:
-        r = _client.get(f"{_c.public_base}/{slug}", headers={"Accept": "text/html"}, follow_redirects=False)
-    except httpx.HTTPError:
-        return None
-    if r.status_code != 200:
-        return None
-    return " ".join(html.unescape(re.sub(r"<[^>]+>", " ", r.text)).split())
-
-
-def _shown(value: Any, page: str) -> Any:
-    """The part of a field a visitor sees on the page, or None. Lists keep only
-    the items shown. A text counts as shown when its first 80 characters are."""
-    if isinstance(value, list):
-        kept = [v for v in value if _shown(v, page) is not None]
-        return kept or None
-    text = value
-    if isinstance(value, dict):
-        text = next((value[k] for k in ("content", "date", "authorized_form_of_name", "name", "title") if value.get(k)), "")
-    text = " ".join(str(text or "").split())
-    return value if text and text[:80] in page else None
-
-
-def _read_base(slug: str, key: str | None) -> dict:
-    """Stock AtoM's REST API returns fields the site may hide from visitors
-    (visible-elements settings, archivist's notes). Every field is kept only
-    where the public page shows it, for every caller. ponytail: staff with their
-    own key see visitor fields too here; full staff reads need the AHG API."""
-    page = _page_text(slug)
-    _visible_cache[(_c.public_base, slug)] = (time.time(), page is not None)
-    if page is None:
-        raise NotVisible()
-    d = _api("GET", f"/informationobjects/{slug}", key)
-    f = lambda name: _shown(d.get(name), page)  # noqa: E731
-    return {
-        "found": True, "source": _c.name, "url": _url(slug), "slug": slug,
-        "title": d.get("title"), "reference_code": f("reference_code"), "level": d.get("level_of_description"),
-        "dates": f("dates"), "extent": f("extent_and_medium"), "scope_and_content": f("scope_and_content"),
-        "archival_history": f("archival_history"), "names": _shown(_names_base(d), page) or [],
-        "subjects": f("subject_access_points"), "places": f("place_access_points"), "notes": f("notes"),
-        "repository": f("repository"), "part_of": [], "children_count": None, "images": [],
-    }
 
 
 @mcp.tool()
@@ -677,44 +380,6 @@ def get_record_text(slug: str, offset: int = 0, limit: int = 20000, catalogue: s
     return _logged("get_record_text", args, ctx, run)
 
 
-MAX_IMAGE_BYTES = 3_000_000
-IMAGE_TYPES = {"image/jpeg": "jpeg", "image/png": "png", "image/gif": "gif", "image/webp": "webp"}
-
-
-class ImageRefused(Exception):
-    def __init__(self, outcome: str, message: str):
-        super().__init__(message)
-        self.outcome, self.message = outcome, message
-
-
-def _fetch_image(ref: str) -> tuple[bytes, str]:
-    """The image at ref, which must be on the current catalogue's own host:
-    no redirects, image types only, read in pieces and stopped at
-    MAX_IMAGE_BYTES. For a demo catalogue (added by staff on a web page) the
-    host must also still be a public address. ponytail: the address is resolved
-    twice (check, then fetch); pin the address if demo catalogues go beyond staff."""
-    u, home = httpx.URL(ref), httpx.URL(_c.public_base)
-    if u.host != home.host or u.port != home.port or u.userinfo:
-        raise ImageRefused("off_site", "The image is not on the catalogue's own site, so it is not fetched.")
-    if _c.demo and (why := _not_public(ref)):
-        raise ImageRefused("off_site", why)
-    with _client.stream("GET", ref, headers={"Accept": "image/*"}, follow_redirects=False) as r:
-        if r.status_code != 200:
-            raise ImageRefused("error:http", "The image could not be fetched. Try again later.")
-        ctype = r.headers.get("content-type", "").split(";")[0].strip().lower()
-        if ctype not in IMAGE_TYPES:
-            raise ImageRefused("not_image", "The catalogue did not return an image for this record.")
-        too_large = ImageRefused("too_large", f"The image is too large to show here; open it at {ref}")
-        if int(r.headers.get("content-length") or 0) > MAX_IMAGE_BYTES:
-            raise too_large
-        data = bytearray()
-        for chunk in r.iter_bytes():
-            data += chunk
-            if len(data) > MAX_IMAGE_BYTES:
-                raise too_large
-    return bytes(data), IMAGE_TYPES[ctype]
-
-
 @mcp.tool()
 def get_record_image(slug: str, catalogue: str = "", ctx: Context | None = None) -> list:
     """Look at a record's image: returns the reference image itself, so you can
@@ -774,42 +439,6 @@ class Proposal(BaseModel):
     link_reason: str = Field("", description="With existing_id: why it is the same person, organisation or place, e.g. matching dates or places.")
 
 
-def _needs_key(ctx: Context | None) -> str:
-    key = _caller_key(ctx)
-    if not key:
-        raise NeedsCallerKey()
-    return key
-
-
-# Kept on disk (GLAM_DATA), so a restart does not reset anyone's hour.
-_cap_lock = threading.Lock()
-try:
-    _cap_db = sqlite3.connect(os.path.join(os.environ.get("GLAM_DATA", "/data"), "proposal-cap.db"), check_same_thread=False)
-    _cap_db.execute("SELECT 1")
-except sqlite3.OperationalError:
-    # No writable GLAM_DATA (a bare test run): counted in memory, reset on restart.
-    logging.getLogger("glam-mcp").warning("GLAM_DATA not writable: the hourly proposal limit resets on restart")
-    _cap_db = sqlite3.connect(":memory:", check_same_thread=False)
-_cap_db.execute("CREATE TABLE IF NOT EXISTS spent (key TEXT NOT NULL, ts REAL NOT NULL)")
-_cap_db.execute("CREATE INDEX IF NOT EXISTS spent_key_ts ON spent (key, ts)")
-
-
-def _budget(key: str, n: int = 0) -> int:
-    """Spend n proposal items for this key and return what is left this hour.
-    Refuses, spending nothing, when n would go over the cap."""
-    k = hashlib.sha256(key.encode()).hexdigest()
-    now = time.time()
-    with _cap_lock, _cap_db:
-        _cap_db.execute("DELETE FROM spent WHERE ts < ?", (now - 3600,))
-        used, first = _cap_db.execute("SELECT COUNT(*), MIN(ts) FROM spent WHERE key = ?", (k,)).fetchone()
-        if n and used + n > PROPOSAL_CAP:
-            wait = int(first + 3600 - now) // 60 + 1 if first else 60
-            raise Refused(f"At most {PROPOSAL_CAP} proposals an hour per person; {PROPOSAL_CAP - used} left. "
-                          f"Try again in about {wait} minutes, or propose fewer at once.")
-        _cap_db.executemany("INSERT INTO spent (key, ts) VALUES (?, ?)", [(k, now)] * n)
-        return PROPOSAL_CAP - used - n
-
-
 @mcp.tool()
 def list_my_proposals(status: Literal["pending", "approved", "edited", "linked", "rejected", "new_record_created", "parked"] | None = None,
                       limit: int = 25, skip: int = 0, ctx: Context | None = None) -> dict:
@@ -831,47 +460,6 @@ def list_my_proposals(status: Literal["pending", "approved", "edited", "linked",
         results = [{**r, "url": _url(r["slug"]) if r.get("slug") else None} for r in data.get("results", [])]
         return {"source": _c.name, "total": data.get("total", len(results)), "results": results}
     return _logged("list_my_proposals", args, ctx, run)
-
-
-# Stock AtoM's CSV import, in "update matches ignoring blank fields" mode, adds
-# names, places and subjects to the matched record and leaves everything else
-# alone (checked on AtoM 2.10.2). It replaces dates, and with them the creator
-# links, so dates are never put in the file.
-CSV_COLUMNS = {"person": "nameAccessPoints", "organisation": "nameAccessPoints", "place": "placeAccessPoints"}
-
-
-def _import_csv(slug: str, rec: dict, items: list, key: str | None) -> dict:
-    """Stock AtoM: the proposals as a one-row CSV for Import > CSV, matched on the
-    record's identifier, title and repository (how AtoM finds it)."""
-    identifier = (_api("GET", f"/informationobjects/tree/{slug}", key).get("identifier") or "").strip()
-    dates = [p.value for p in items if p.kind == "date"]
-    values: dict[str, list[str]] = defaultdict(list)
-    for p in items:
-        if p.kind in CSV_COLUMNS:
-            v = p.value.strip().replace("|", "/")  # | separates values in AtoM CSV
-            if v not in values[CSV_COLUMNS[p.kind]]:
-                values[CSV_COLUMNS[p.kind]].append(v)
-    note = (" Enter the dates by hand on the edit screen: " + "; ".join(dates) + ". An import would replace the record's dates.") if dates else ""
-    if not values:
-        return {"message": "Nothing was saved: this catalogue's API cannot add dates without overwriting them." + note}
-    if not identifier or not rec.get("title") or not rec.get("repository"):
-        return {"message": "Nothing was saved, and no import file could be made: AtoM matches an import on the record's "
-                           "identifier, title and repository, and this record lacks " + ("an identifier" if not identifier else "a repository")
-                           + ". Add the names and places on its edit screen." + note}
-    out = io.StringIO()
-    # Without publicationStatus an update import resets the record to the site's
-    # default status (draft): checked on AtoM 2.10.2. Only records a visitor can
-    # see get a file, so Published is their current status.
-    cols = ["identifier", "title", "repository", "publicationStatus", *sorted(values)]
-    w = csv.writer(out)
-    w.writerow(cols)
-    w.writerow([identifier, rec["title"], rec["repository"], "Published", *("|".join(values[c]) for c in sorted(values))])
-    return {
-        "import_csv": out.getvalue(),
-        "message": "Nothing was saved yet. To apply the names and places without retyping, save import_csv as a .csv file and load it "
-                   "in AtoM at Import > CSV: type Archival description, update behaviour \"Update matches ignoring blank fields in CSV\", "
-                   "and tick \"Skip unmatched records\". AtoM adds them to the record and leaves the rest as it is." + note,
-    }
 
 
 @mcp.tool()
@@ -1101,7 +689,7 @@ def propose_translation(
 @mcp.custom_route("/healthz", methods=["GET"])
 async def healthz(request: Request) -> JSONResponse:
     try:
-        r = _client.get(_c.api_base + ("" if _c.backend == "atom-ahg" else "/informationobjects?limit=1"), headers={_c.key_header: _c.key})
+        r = adapters._client.get(_c.api_base + ("" if _c.backend == "atom-ahg" else "/informationobjects?limit=1"), headers={_c.key_header: _c.key})
         ok = r.status_code < 500
     except Exception:
         ok = False
