@@ -64,6 +64,10 @@ Since v0.6.0 no field on stock AtoM comes from its REST API: every value is read
 
 26 October 2026, ric.theahg.co.za through a test MCP (openric backend, no key), hidden list from the Heratio database it reads (drafts, embargo, classification, ICIP; read only): 17 hidden records, 73 checks, all passed; control `title-of-object` found. Calls answered "rate limited" are retried and never counted as a pass (OpenRiC allows 60 requests a minute).
 
+## Stock AtoM behind a bot check (external tester, 26 Oct 2026)
+
+An outside tester (Catholic Archives UK, stock AtoM with a JavaScript bot check on HTML pages) found that the check's 200 "Redirecting... /challenge" page read as an empty record with found: true, and counted as visible, which on stock AtoM 2.10.2 (whose API returns drafts) could let draft titles into search. Fixed in cc951cb: only AtoM's own record page (body class of a description module and the index action) counts as readable or visible; anything else answers unavailable and is hidden. CI's leak test against a real stock AtoM still passed (run 40345471762). After the site let the AHG-GLAM-MCP/ User-Agent past its check, `stuff/test-catholic-archives.sh` passed all five checks: search (27), full record read, children (14), a missing slug answers not_found, search across catalogues.
+
 ## OpenRiC Workspace: no bypass (v0.8)
 
 26 October 2026, workspace.openric.org as home catalogue of a signed-in test MCP, with a reviewer's write key (`stuff/test-workspace-v08.sh`): every kind of proposal sent for one record (people, place, date, field change, transcription, translation, relationship). The 12 record tables (record_resources, names, description_values, identifiers, dates, relations, relation_assertions, relation_evidence, instantiations, digital_files, agents, places) were identical by md5 before and after; the proposals table grew (0 to 6, then 6 to 12 on a second run). list_my_proposals listed them as proposed. The relationship, between people with no authority record, came back not queued with Workspace's reason, as its contract says.
