@@ -38,6 +38,13 @@ cannot pass. Reads the hidden list from the database (read only).
 
 CATALOGUE_DB_CNF (or PSIS_DB_CNF) is a mysql defaults file; CATALOGUE_DB the
 database (default archive).
+
+OpenRiC (openric backend): TEST_BACKEND=openric. The reference service reads
+Heratio's database, so the default queries apply (records by slug; search and
+children answer numeric ids, which are matched too). OpenRiC Workspace has
+another schema: HIDDEN_FILE, a tab-separated list of id, title, parent id and
+why (tests/openric_workspace_hidden.sql), records named by id. OpenRiC returns
+no hierarchy for a record, so that check is left out for it.
 """
 
 import asyncio
@@ -54,6 +61,8 @@ DB_CNF = os.environ.get("CATALOGUE_DB_CNF") or os.environ.get("PSIS_DB_CNF", "")
 DB_NAME = os.environ.get("CATALOGUE_DB", "archive")
 PUBLIC_CONTROL = os.environ.get("PUBLIC_CONTROL_SLUG", "hendrik-and-debora-engelbrecht")
 CAP = int(os.environ.get("NO_LEAK_CAP", "40"))
+HIDDEN_FILE = os.environ.get("HIDDEN_FILE", "")
+OPENRIC = bool(HIDDEN_FILE) or os.environ.get("TEST_BACKEND") == "openric"
 
 # Each kind of hidden record, with the table (or table.column) it needs; kinds
 # the catalogue lacks (stock AtoM has drafts only) are left out.
@@ -113,7 +122,13 @@ async def call(s: ClientSession, tool: str, **args) -> dict:
     return json.loads(r.content[0].text) if r.content else {}
 
 
-async def main() -> int:
+def hidden_from_file() -> list[list[str]]:
+    rows = [line.rstrip("\n").split("\t") for line in open(HIDDEN_FILE, encoding="utf-8") if line.strip()]
+    return [[r[0], r[0], r[1] if len(r) > 1 else "", r[2] if len(r) > 2 else "", r[3] if len(r) > 3 else "hidden"]
+            for r in rows[:CAP]]
+
+
+def hidden_from_db() -> list[list[str]]:
     tables = {t for (t,) in sql("SHOW TABLES")}
     tables |= {f"{t}.{c}" for t, c in sql("SELECT table_name, column_name FROM information_schema.columns "
                                          "WHERE table_schema = DATABASE() AND column_name IN ('inherit_to_children', 'applies_to_descendants')")}
@@ -127,6 +142,11 @@ async def main() -> int:
         for row in sql(HIDDEN_SQL.format(kinds=q) + f" LIMIT {share + len(seen)}"):
             if row[0] not in seen and share > 0:
                 hidden.append(row); seen.add(row[0]); share -= 1
+    return hidden
+
+
+async def main() -> int:
+    hidden = hidden_from_file() if HIDDEN_FILE else hidden_from_db()
     if not hidden:
         print("FAIL no hidden records to test - the fixture or the query is wrong")
         return 1
@@ -152,17 +172,19 @@ async def main() -> int:
                         failures.append(f"{label}: {tool} returned it")
                 if title.strip():
                     checks += 1
-                    hits = (await call(s, "search_records", query=f'"{title[:80]}"', limit=25)).get("results", [])
-                    if any(h.get("slug") == slug for h in hits):
+                    # OpenRiC matches plain title text; quotes would find nothing and pass for nothing.
+                    query = title[:80] if OPENRIC else f'"{title[:80]}"'
+                    hits = (await call(s, "search_records", query=query, limit=25)).get("results", [])
+                    if any(h.get("slug") in (slug, io_id) for h in hits):
                         failures.append(f"{label}: search for its title returned it")
                 if parent_id and parent_id != "1" and parent_id not in slugs_by_id:
-                    parent_slug = sql(f"SELECT slug FROM slug WHERE object_id = {int(parent_id)}")
+                    parent_slug = [[parent_id]] if HIDDEN_FILE else sql(f"SELECT slug FROM slug WHERE object_id = {int(parent_id)}")
                     if parent_slug:
                         checks += 1
                         kids = (await call(s, "get_children", slug=parent_slug[0][0])).get("results", [])
-                        if any(k.get("slug") == slug for k in kids):
+                        if any(k.get("slug") in (slug, io_id) for k in kids):
                             failures.append(f"{label}: listed among the children of {parent_slug[0][0]}")
-                for (child,) in sql(VISIBLE_CHILD_SQL.format(id=int(io_id))):
+                for (child,) in ([] if OPENRIC else sql(VISIBLE_CHILD_SQL.format(id=int(io_id)))):
                     checks += 1
                     rec = await call(s, "get_record", slug=child)
                     if any(slug in (a.get("url") or "") or (title and a.get("title") == title) for a in rec.get("part_of", [])):
@@ -176,6 +198,6 @@ async def main() -> int:
 
 
 if __name__ == "__main__":
-    if not DB_CNF:
+    if not DB_CNF and not HIDDEN_FILE:
         sys.exit("Set CATALOGUE_DB_CNF to a mysql defaults file (read-only use)")
     sys.exit(asyncio.run(main()))

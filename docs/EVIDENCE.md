@@ -59,6 +59,10 @@ Since v0.6.0 no field on stock AtoM comes from its REST API: every value is read
 
 - `pip-audit`: the only findings were in the base image's pip (12 known issues); pip is upgraded in the image, and the scan of everything the service runs reports no known vulnerabilities. CI runs the scan on every push (failing on findings) and keeps a CycloneDX SBOM with the run. `SECURITY.md` describes reporting.
 
+## OpenRiC Workspace leak test
+
+26 October 2026, workspace.openric.org through a test MCP (openric backend): the hidden list from Workspace's own database (`tests/openric_workspace_hidden.sql`: deleted, or no published authorised name; 1 of 981 records), 1 hidden record, 4 checks, all passed. Negative control: a published record listed as hidden fails both get_record and search, so the test can fail. Workspace's API takes no key and serves the public view only, so no key can widen it. Not covered: records hidden only by the Public role's permissions.
+
 ## Daily cap (plugins #223)
 
 `stuff/test-223-daily-cap.sh` on PSIS, 26 October 2026: a throwaway read-only key with a daily cap of 3 answered 200, 200, 200, then 429 with Retry-After 51172 (seconds to midnight).
@@ -70,6 +74,6 @@ Heratio (26 October 2026): service key checked (reads only what a visitor sees);
 ## Pending
 
 - Item 5: sign-in through a real browser (`tests/SIGNIN_TEST.md`).
-- OpenRiC and Workspace leak tests: need read access to their databases.
+- OpenRiC reference service leak test: `stuff/test-openric-leak.sh` on the AHG host (needs the MySQL password for the Heratio database it reads).
 - Item 7: independent security assessment.
 - Item 25: pilot with a partner institution.
