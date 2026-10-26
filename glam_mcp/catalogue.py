@@ -71,7 +71,8 @@ OFF_NETWORK = "This catalogue's address now leads to a non-public address, so it
 
 
 def _api(method: str, path: str, key: str | None = None, **kw) -> Any:
-    r = _client.request(method, _c.api_base + path, headers={_c.key_header: key or _c.key}, **kw)
+    k = key or _c.key
+    r = _client.request(method, _c.api_base + path, headers={_c.key_header: k} if k else {}, **kw)
     if _off_network(r):
         raise Refused(OFF_NETWORK)
     if r.status_code == 404:

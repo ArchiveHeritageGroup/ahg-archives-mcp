@@ -117,9 +117,21 @@ def sql(q: str) -> list[list[str]]:
 CATALOGUE = os.environ.get("TEST_CATALOGUE", "")
 
 
+class Inconclusive(Exception):
+    """The catalogue never gave a real answer (rate limited or unavailable)."""
+
+
 async def call(s: ClientSession, tool: str, **args) -> dict:
-    r = await s.call_tool(tool, {**args, "catalogue": CATALOGUE} if CATALOGUE else args)
-    return json.loads(r.content[0].text) if r.content else {}
+    # "Not found" because the catalogue was busy proves nothing, so a rate-limited
+    # or unavailable answer is retried after a wait (OpenRiC: 60 a minute), and
+    # counted as a failure if it never clears.
+    for wait in (5, 30, 60, 0):
+        r = await s.call_tool(tool, {**args, "catalogue": CATALOGUE} if CATALOGUE else args)
+        out = json.loads(r.content[0].text) if r.content else {}
+        if out.get("error") not in ("rate_limited", "unavailable"):
+            return out
+        await asyncio.sleep(wait)
+    raise Inconclusive(f"{tool} {args}: {out.get('error')}")
 
 
 def hidden_from_file() -> list[list[str]]:
@@ -166,35 +178,45 @@ async def main() -> int:
 
             for io_id, slug, title, parent_id, why in hidden:
                 label = f"{why} {slug}"
-                for tool in ("get_record", "get_iiif_manifest", "get_record_text"):
-                    checks += 1
-                    if (await call(s, tool, slug=slug)).get("found"):
-                        failures.append(f"{label}: {tool} returned it")
-                if title.strip():
-                    checks += 1
-                    # OpenRiC matches plain title text; quotes would find nothing and pass for nothing.
-                    query = title[:80] if OPENRIC else f'"{title[:80]}"'
-                    hits = (await call(s, "search_records", query=query, limit=25)).get("results", [])
-                    if any(h.get("slug") in (slug, io_id) for h in hits):
-                        failures.append(f"{label}: search for its title returned it")
-                if parent_id and parent_id != "1" and parent_id not in slugs_by_id:
-                    parent_slug = [[parent_id]] if HIDDEN_FILE else sql(f"SELECT slug FROM slug WHERE object_id = {int(parent_id)}")
-                    if parent_slug:
-                        checks += 1
-                        kids = (await call(s, "get_children", slug=parent_slug[0][0])).get("results", [])
-                        if any(k.get("slug") in (slug, io_id) for k in kids):
-                            failures.append(f"{label}: listed among the children of {parent_slug[0][0]}")
-                for (child,) in ([] if OPENRIC else sql(VISIBLE_CHILD_SQL.format(id=int(io_id)))):
-                    checks += 1
-                    rec = await call(s, "get_record", slug=child)
-                    if any(slug in (a.get("url") or "") or (title and a.get("title") == title) for a in rec.get("part_of", [])):
-                        failures.append(f"{label}: named in the hierarchy of visible record {child}")
+                try:
+                    checks += await check_one(s, label, io_id, slug, title, parent_id, slugs_by_id, failures)
+                except Inconclusive as e:
+                    failures.append(f"{label}: no real answer ({e})")
 
     print(f"{len(hidden)} hidden records, {checks} checks")
     for f in failures:
         print("FAIL", f)
     print("all passed" if not failures else f"{len(failures)} failed")
     return 1 if failures else 0
+
+
+async def check_one(s, label, io_id, slug, title, parent_id, slugs_by_id, failures) -> int:
+    """Every way the hidden record could come back; returns how many checks ran."""
+    checks = 0
+    for tool in ("get_record", "get_iiif_manifest", "get_record_text"):
+        checks += 1
+        if (await call(s, tool, slug=slug)).get("found"):
+            failures.append(f"{label}: {tool} returned it")
+    if title.strip():
+        checks += 1
+        # OpenRiC matches plain title text; quotes would find nothing and pass for nothing.
+        query = title[:80] if OPENRIC else f'"{title[:80]}"'
+        hits = (await call(s, "search_records", query=query, limit=25)).get("results", [])
+        if any(h.get("slug") in (slug, io_id) for h in hits):
+            failures.append(f"{label}: search for its title returned it")
+    if parent_id and parent_id != "1" and parent_id not in slugs_by_id:
+        parent_slug = [[parent_id]] if HIDDEN_FILE else sql(f"SELECT slug FROM slug WHERE object_id = {int(parent_id)}")
+        if parent_slug:
+            checks += 1
+            kids = (await call(s, "get_children", slug=parent_slug[0][0])).get("results", [])
+            if any(k.get("slug") in (slug, io_id) for k in kids):
+                failures.append(f"{label}: listed among the children of {parent_slug[0][0]}")
+    for (child,) in ([] if OPENRIC else sql(VISIBLE_CHILD_SQL.format(id=int(io_id)))):
+        checks += 1
+        rec = await call(s, "get_record", slug=child)
+        if any(slug in (a.get("url") or "") or (title and a.get("title") == title) for a in rec.get("part_of", [])):
+            failures.append(f"{label}: named in the hierarchy of visible record {child}")
+    return checks
 
 
 if __name__ == "__main__":

@@ -37,6 +37,7 @@ full check. Stock AtoM is read through the visitor check anyway (server.py).
 import ipaddress
 import socket
 import sys
+import time
 from urllib.parse import urlparse
 
 import httpx
@@ -67,7 +68,7 @@ def detect_backend(public_base: str, key: str) -> str:
     for backend in ("openric", "atom-ahg", "atom-base"):
         path, header, probe, _ = BACKENDS[backend]
         try:
-            r = httpx.get(public_base + path + probe, headers={**UA, header: key}, timeout=15.0)
+            r = httpx.get(public_base + path + probe, headers={**UA, **({header: key} if key else {})}, timeout=15.0)
             if r.status_code in (200, 401, 403) and "json" in r.headers.get("content-type", ""):
                 if backend != "openric" or "openric" in r.text[:2000]:
                     return backend
@@ -92,12 +93,32 @@ def not_public(url: str) -> str | None:
     return None
 
 
+class Busy(Exception):
+    """The catalogue kept answering 429 or 503: a record could not be checked."""
+
+
+def _get(c: httpx.Client, url: str, **kw) -> httpx.Response:
+    """GET that waits out rate limiting (429, 503 with Retry-After, up to 60 s,
+    three tries), so a busy catalogue is not mistaken for a hidden record.
+    OpenRiC allows 60 requests a minute and asks for about 50 s."""
+    for _ in range(3):
+        r = c.get(url, **kw)
+        if r.status_code not in (429, 503):
+            return r
+        try:
+            wait = min(float(r.headers.get("retry-after", 2)), 60.0)
+        except ValueError:
+            wait = 2.0
+        time.sleep(wait)
+    raise Busy(url)
+
+
 def _opens(c: httpx.Client, page: str, hops: int = 3) -> bool:
     """Does this page open for a visitor? A redirect that stays on the same host
     is followed (Heratio sends sector records on to /museum/..., /dam/...); one
     to another host, or to sign-in, does not count as open."""
     for _ in range(hops):
-        r = c.get(page, headers={"Accept": "text/html"}, follow_redirects=False)
+        r = _get(c, page, headers={"Accept": "text/html"}, follow_redirects=False)
         if r.status_code == 200:
             return True
         nxt = r.headers.get("location") if r.is_redirect else None
@@ -112,7 +133,14 @@ def _opens(c: httpx.Client, page: str, hops: int = 3) -> bool:
 
 def check(url: str, key: str, backend: str) -> str | None:
     """Why the key is not fit to serve the public, or None."""
-    url = url.rstrip("/")
+    try:
+        return _check(url.rstrip("/"), key, backend)
+    except Busy:
+        # Fail closed, but say why: the sample could not be read, not that it leaks.
+        return "The catalogue kept answering 'too many requests', so the key could not be checked. Try again in a minute."
+
+
+def _check(url: str, key: str, backend: str) -> str | None:
     with httpx.Client(timeout=20.0, headers=UA) as c:
         if backend == "atom-ahg":
             h = {"X-API-Key": key}
@@ -126,12 +154,14 @@ def check(url: str, key: str, backend: str) -> str | None:
         elif backend == "openric":
             # OpenRiC reads need no key, and its API decides visibility (its record
             # pages send browsers on to a viewer on another host): every record it
-            # lists must also open through the API by its slug.
-            r = c.get(url + "/api/ric/v1/records", params={"limit": SAMPLE})
+            # lists must also open through the API by its slug. A key, when given, is
+            # used for both (OpenRiC Workspace keys read only what the public may).
+            h = {"X-API-Key": key} if key else {}
+            r = c.get(url + "/api/ric/v1/records", params={"limit": SAMPLE}, headers=h)
             if r.status_code != 200:
                 return f"The catalogue's OpenRiC API answered {r.status_code}."
             slugs = [str(i["@id"]).rstrip("/").rsplit("/", 1)[-1] for i in (r.json().get("openric:items") or []) if i.get("@id")]
-            hidden = [s for s in slugs if c.get(f"{url}/api/ric/v1/records/{s}").status_code != 200]
+            hidden = [s for s in slugs if _get(c, f"{url}/api/ric/v1/records/{s}", headers=h).status_code != 200]
             if hidden:
                 return f"{len(hidden)} of {len(slugs)} sampled records do not open through the API (for example {hidden[0]})."
             return None

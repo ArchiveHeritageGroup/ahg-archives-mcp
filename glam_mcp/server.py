@@ -758,8 +758,9 @@ if AUTH_MODE == "oauth":
 
 
 def main() -> None:
-    if not _c.key:
-        raise SystemExit("PSIS_API_KEY is not set")
+    # OpenRiC serves the public without a key (and refuses a key it does not know).
+    if not _c.key and HOME.backend != "openric":
+        raise SystemExit("CATALOGUE_API_KEY is not set")
     # The service key answers every caller without a key of their own, so it must
     # read no more than a visitor does. Refuse to start rather than serve with it.
     if why := keycheck(HOME.public_base, HOME.key, HOME.backend):

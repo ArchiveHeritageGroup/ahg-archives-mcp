@@ -29,7 +29,8 @@ PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 100
 
 
 class FakeCatalogue:
-    """Answers by (method, path); records every request it is sent."""
+    """Answers by (method, path); records every request it is sent. A list of
+    answers is given in turn, the last one repeating."""
 
     def __init__(self):
         self.routes: dict[tuple[str, str], httpx.Response] = {}
@@ -38,6 +39,8 @@ class FakeCatalogue:
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.seen.append(request)
         hit = self.routes.get((request.method, request.url.host + request.url.path))
+        if isinstance(hit, list):
+            hit = hit.pop(0) if len(hit) > 1 else hit[0]
         return hit if hit is not None else httpx.Response(404, json={"message": "Not found"})
 
     def json(self, method, host_path, body, status=200):
@@ -256,6 +259,18 @@ class KeyCheck(Base):
         self.cat.routes[("GET", "cat.example.org/elsewhere")] = httpx.Response(302, headers={"location": "https://other.example/x"})
         self.cat.routes[("GET", "other.example/x")] = httpx.Response(200, text="<html>")
         self.assertIn("2 of 3 sampled records", keycheck.check(HOME, "k", "atom-ahg"))
+
+    def test_rate_limited_record_is_retried_not_counted_hidden(self):
+        self.cat.json("GET", "cat.example.org/api/v2/proposals", {"message": "Forbidden"}, 403)
+        self.cat.json("GET", "cat.example.org/api/v2/descriptions", {"data": {"results": [{"slug": "busy-one"}]}})
+        self.cat.routes[("GET", "cat.example.org/busy-one")] = [httpx.Response(429, headers={"retry-after": "0"}), httpx.Response(200, text="<html>")]
+        self.assertIsNone(keycheck.check(HOME, "k", "atom-ahg"))
+
+    def test_catalogue_that_stays_busy_is_not_called_leaking(self):
+        self.cat.json("GET", "cat.example.org/api/v2/proposals", {"message": "Forbidden"}, 403)
+        self.cat.json("GET", "cat.example.org/api/v2/descriptions", {"data": {"results": [{"slug": "busy-one"}]}})
+        self.cat.routes[("GET", "cat.example.org/busy-one")] = httpx.Response(429, headers={"retry-after": "0"})
+        self.assertIn("too many requests", keycheck.check(HOME, "k", "atom-ahg"))
 
     def test_private_addresses_refused(self):
         for url in ("http://127.0.0.1:8097", "http://10.0.0.5", "file:///etc/passwd", "localhost"):
