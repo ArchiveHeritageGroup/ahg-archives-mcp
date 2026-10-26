@@ -191,6 +191,7 @@ The signed-in service serves a staff page at `/usage`: calls per day, per tool, 
 
 ## Versions
 
+- **v0.7.1** (26 Oct 2026): one User-Agent on every request, `AHG-GLAM-MCP/0.7`, with a prefix that stays the same for fail2ban and bot rules; the health check covers every hosted client; the leak test runs against OpenRiC (Workspace passed).
 - **v0.7.0** (26 Oct 2026): evidence release, second part. Tools run in worker threads (3 times the throughput under load); an `error` code on every failure; OpenRiC Workspace through the openric adapter; dependency scan and SBOM in CI (pip upgraded in the image); `SECURITY.md`; `docs/OPERATIONS.md` with backup, restore, rollback and health alerts, each tried once; `list_catalogues` logged; hosted clients removed completely on leaving. 52 unit tests.
 - **v0.6.1** (26 Oct 2026): OpenRiC adapter for OpenRiC v0.17.27, which shows published records only: dates from its date ranges, children from its hierarchy, typed title search, key check through its API. Checked locally against ric.theahg.co.za.
 - **v0.6.0** (26 Oct 2026): evidence release. Stock AtoM fields only from the public page (no field from the API); OpenRiC adapter (read only); one table of backends; Heratio served by `atom-ahg`; key check follows same-host redirects; leak test covers Heratio's embargo table, classification above PUBLIC, inherited restrictions, and samples each kind of hidden record; a unit test proves no write path besides the review queue. 45 unit tests.
