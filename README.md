@@ -141,6 +141,8 @@ A catalogue that cannot be reached at start-up is left out with a warning. Each 
 
 **Demo catalogues.** For a show and tell, catalogue administrators and editors can add a client's catalogue on the signed-in service's `/catalogues` page: a name, its address and a read-only key from it. Agents then find it in `list_catalogues` and read it with `catalogue="<name>"`. It lapses after `GLAM_DEMO_DAYS` (7) days. Addresses inside the host's own network are refused. Both services read the list from `<GLAM_DATA>/demo-catalogues.json`, so they share it without a restart.
 
+**Federation.** `search_records` with `catalogue="all"` searches every catalogue at once, each with its own visitor key, and labels every result with its catalogue. To search a catalogue's federation peers (ahgFederationPlugin), add each peer here as its own catalogue with a visitor key from that peer. The service does not search through the plugin's federation: the plugin queries its peers with whatever key each was set up with, and its Elasticsearch connector does not leave out unpublished records, so results could include what a visitor may not see. Added this way, every peer passes the start-up key check and can be leak-tested.
+
 To run the no-leak test through a second catalogue, set `TEST_CATALOGUE` to its name.
 
 ## Running it
