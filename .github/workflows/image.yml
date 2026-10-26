@@ -1,0 +1,39 @@
+# On a version tag (v0.4.0 ...): run the no-leak tests, then publish the image to
+# GitHub's container registry as ghcr.io/archiveheritagegroup/ahg-archives-mcp,
+# tagged with the version and "latest". Clients pull it instead of building it.
+name: image
+on:
+  push:
+    tags: ['v*']
+jobs:
+  test:
+    uses: ./.github/workflows/no-leak.yml
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/archiveheritagegroup/ahg-archives-mcp
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest
+          labels: |
+            org.opencontainers.image.title=AHG Archives MCP server
+            org.opencontainers.image.licenses=AGPL-3.0-or-later
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

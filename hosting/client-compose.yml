@@ -1,0 +1,34 @@
+# One hosted client: a signed-in and a public service for that client's catalogue.
+# Filled in from clients/<client>/.env by hosting/client.sh; do not edit per client.
+name: glam-mcp-${CLIENT}
+x-common: &common
+  image: ${GLAM_IMAGE}
+  restart: unless-stopped
+  user: "${RUN_AS}"
+  env_file: .env
+  volumes:
+    - ./logs:/logs
+    - ./data:/data
+
+services:
+  public:
+    <<: *common
+    ports:
+      - "127.0.0.1:${PUBLIC_PORT}:8000"
+    environment:
+      GLAM_AUTH: "off"
+      GLAM_HTTP_PATH: /public/mcp
+      GLAM_CALL_LOG: /logs/calls-public.jsonl
+      MCP_SIGNED_IN_URL: https://${HOST}/mcp
+
+  signed-in:
+    <<: *common
+    ports:
+      - "127.0.0.1:${SIGNED_PORT}:8000"
+    environment:
+      GLAM_AUTH: oauth
+      MCP_PUBLIC_URL: https://${HOST}
+      GLAM_HTTP_PATH: /mcp
+      GLAM_DATA: /data
+      GLAM_CALL_LOG: /logs/calls.jsonl
+      GLAM_USAGE_LOGS: /logs/calls.jsonl,/logs/calls-public.jsonl

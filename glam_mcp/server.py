@@ -63,6 +63,8 @@ from pydantic import BaseModel, Field
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from glam_mcp.keycheck import detect_backend as _detect_backend
+
 def _setting(name: str, old: str = "", default: str | None = None) -> str:
     """A setting by its name, or by the name it had before (PSIS_*/GLAM_*). With
     no default it is required: an install that forgets it must not quietly use
@@ -71,24 +73,6 @@ def _setting(name: str, old: str = "", default: str | None = None) -> str:
     if value is None:
         raise SystemExit(f"{name} is required (see README, Install for your own catalogue)")
     return value
-
-
-def _detect_backend(public_base: str, key: str) -> str:
-    """auto: ask the catalogue which API it has. AHG REST API v2 (ahgAPIPlugin)
-    answers JSON at /api/v2, even when it refuses the key; stock AtoM's
-    arRestApiPlugin answers at /api. A catalogue that answers neither cannot be
-    served, so the service stops and is restarted to ask again."""
-    ua = {"User-Agent": "AHG-GLAM-MCP/0.3 (+https://www.atom-extensions.com)", "Accept": "application/json"}
-    for backend, path, header in (("atom-ahg", "/api/v2/descriptions?limit=1", "X-API-Key"),
-                                  ("atom-base", "/api/informationobjects?limit=1", "REST-API-Key")):
-        try:
-            r = httpx.get(public_base + path, headers={**ua, header: key}, timeout=15.0)
-            if r.status_code in (200, 401, 403) and "json" in r.headers.get("content-type", ""):
-                return backend
-        except httpx.HTTPError:
-            pass
-    raise SystemExit(f"GLAM_BACKEND=auto: {public_base} answers neither /api/v2 (AHG) nor /api (stock AtoM REST API); "
-                     "check CATALOGUE_URL and that the API plugin is enabled, or set GLAM_BACKEND")
 
 
 PUBLIC_BASE = _setting("CATALOGUE_URL", "PSIS_PUBLIC_BASE").rstrip("/")

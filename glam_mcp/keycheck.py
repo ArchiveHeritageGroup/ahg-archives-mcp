@@ -1,0 +1,91 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Copyright (C) 2026 Johan Pieterse
+# Plain Sailing Information Systems
+# Email: johan@plainsailingisystems.co.za
+#
+# This file is part of the AHG Archives MCP server.
+#
+# The AHG Archives MCP server is free software: you can redistribute it and/or
+# modify it under the terms of the GNU Affero General Public License as
+# published by the Free Software Foundation, either version 3 of the License,
+# or (at your option) any later version.
+#
+# It is distributed in the hope that it will be useful, but WITHOUT ANY
+# WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
+# A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+# details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with it. If not, see <https://www.gnu.org/licenses/>.
+
+"""Is a catalogue key visitor-level? Checked before a key serves the public
+(a hosted client's service key, a demo catalogue's key), without access to the
+catalogue's database:
+
+  - AHG API: a key that may list everyone's proposals is staff, refused;
+  - a sample of the records the key reads (newest first, where drafts sit)
+    must each open for a visitor on the public site, or the key sees more
+    than a visitor does.
+
+ponytail: a sample, not proof; tests/no_leak.py with database access is the
+full check. Stock AtoM is read through the visitor check anyway (server.py).
+
+  python -m glam_mcp.keycheck <catalogue-url> <key>     exit 0 when fit
+"""
+
+import sys
+
+import httpx
+
+UA = {"User-Agent": "AHG-GLAM-MCP/0.3 (+https://www.atom-extensions.com)", "Accept": "application/json"}
+SAMPLE = 40
+
+
+def detect_backend(public_base: str, key: str) -> str:
+    """auto: ask the catalogue which API it has. AHG REST API v2 (ahgAPIPlugin)
+    answers JSON at /api/v2, even when it refuses the key; stock AtoM's
+    arRestApiPlugin answers at /api. A catalogue that answers neither cannot be
+    served, so the service stops and is restarted to ask again."""
+    for backend, path, header in (("atom-ahg", "/api/v2/descriptions?limit=1", "X-API-Key"),
+                                  ("atom-base", "/api/informationobjects?limit=1", "REST-API-Key")):
+        try:
+            r = httpx.get(public_base + path, headers={**UA, header: key}, timeout=15.0)
+            if r.status_code in (200, 401, 403) and "json" in r.headers.get("content-type", ""):
+                return backend
+        except httpx.HTTPError:
+            pass
+    raise SystemExit(f"GLAM_BACKEND=auto: {public_base} answers neither /api/v2 (AHG) nor /api (stock AtoM REST API); "
+                     "check CATALOGUE_URL and that the API plugin is enabled, or set GLAM_BACKEND")
+
+
+def check(url: str, key: str, backend: str) -> str | None:
+    """Why the key is not fit to serve the public, or None."""
+    url = url.rstrip("/")
+    with httpx.Client(timeout=20.0, headers=UA) as c:
+        if backend == "atom-ahg":
+            h = {"X-API-Key": key}
+            if c.get(url + "/api/v2/proposals", params={"mine": 0, "count": 1}, headers=h).status_code == 200:
+                return "This key belongs to a catalogue administrator or editor. Give a key for a user with no groups."
+            r = c.get(url + "/api/v2/descriptions", params={"limit": SAMPLE}, headers=h)
+            if r.status_code != 200:
+                return f"The catalogue refused this key ({r.status_code}). Give a key with the Read scope."
+            body = r.json()
+            slugs = [d["slug"] for d in (body.get("data", body).get("results") or []) if d.get("slug")]
+        else:
+            r = c.get(url + "/api/informationobjects", params={"limit": SAMPLE}, headers={"REST-API-Key": key})
+            if r.status_code != 200:
+                return f"The catalogue refused this key ({r.status_code}). Give the REST API key of a user with no groups."
+            return None  # stock AtoM: every record is checked against the public page as it is read
+        hidden = [s for s in slugs if c.get(f"{url}/{s}", headers={"Accept": "text/html"}).status_code != 200]
+        if hidden:
+            return (f"This key reads {len(hidden)} of {len(slugs)} sampled records a visitor cannot open (for example {hidden[0]}). "
+                    "Give a key for a user with no groups.")
+    return None
+
+
+if __name__ == "__main__":
+    u, k = sys.argv[1], sys.argv[2]
+    why = check(u, k, detect_backend(u.rstrip("/"), k))
+    print(why or "ok: the key reads only what a visitor sees (sampled)")
+    sys.exit(1 if why else 0)

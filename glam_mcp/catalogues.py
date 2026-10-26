@@ -41,6 +41,7 @@ import httpx
 from starlette.requests import Request
 from starlette.responses import HTMLResponse
 
+from glam_mcp import keycheck
 from glam_mcp.usage import _page, _table
 
 DEMO_DAYS = int(os.environ.get("GLAM_DEMO_DAYS", "7"))
@@ -130,6 +131,8 @@ Each one lapses after {DEMO_DAYS} days. For administrators and editors of {html.
             backend = detect(url, key)
         except SystemExit:
             return _page("Demo catalogues", _list(f"{url} answers neither the AHG API nor AtoM's REST API. Check the address, and that the API is switched on.", True), 400)
+        if why := keycheck.check(url, key, backend):
+            return _page("Demo catalogues", _list(why, True), 400)
         rows = [x for x in rows if x["name"] != name] + [{"name": name, "url": url, "key": key, "backend": backend, "added": time.time()}]
         _save(rows)
         return _page("Demo catalogues", _list(f"Added {name}. In the agent: list_catalogues, then use catalogue=\"{name}\"."))

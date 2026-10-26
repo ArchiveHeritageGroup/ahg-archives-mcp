@@ -2,7 +2,12 @@
 # run the MCP's public read-only service against it, and fail if any hidden
 # record comes back through a tool (tests/no_leak.py). No secrets needed.
 name: no-leak
-on: [push, pull_request, workflow_dispatch]
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+  workflow_call:   # image.yml runs it before publishing
 jobs:
   stock-atom:
     runs-on: ubuntu-latest
