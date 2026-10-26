@@ -44,4 +44,4 @@ list_catalogues, search_records, get_record, get_children, work_through_series, 
 | Official MCP Registry | `mcp-publisher` with server.json from this folder | A DNS TXT record on theahg.co.za (domain namespace) |
 | Other public MCP directories | Their submission forms, using the text above | Usually a public repository or a public endpoint (the public endpoint is enough for some) |
 
-Before submitting: make the repository public (stuff/mcp-repo-public.sh; history checked clean 26 Oct 2026), add the DNS TXT record for the registry name, and decide whether the listing waits for the Heratio backend (#9), as the roadmap had it.
+Repository public since 26 Oct 2026; image ghcr.io/archiveheritagegroup/ahg-archives-mcp:0.4.0 public. Official registry: add the DNS TXT record on theahg.co.za, then run stuff/mcp-registry-publish.sh (PSIS host).

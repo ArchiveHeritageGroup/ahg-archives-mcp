@@ -2,9 +2,13 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "za.co.theahg/ahg-archives",
   "title": "AHG Archives",
-  "description": "Search and read AtoM archival catalogues with citable links; staff propose access points, dates, relationships, transcriptions and translations for archivist review.",
-  "version": "1.0.0",
+  "description": "Search and read AtoM archival catalogues with citable links; staff propose changes for review.",
+  "version": "0.4.0",
   "websiteUrl": "https://www.atom-extensions.com",
+  "repository": {
+    "url": "https://github.com/ArchiveHeritageGroup/ahg-archives-mcp",
+    "source": "github"
+  },
   "remotes": [
     {
       "type": "streamable-http",
