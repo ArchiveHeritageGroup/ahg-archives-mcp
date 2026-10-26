@@ -69,9 +69,10 @@ The server runs beside your catalogue, on your own address, and talks to it only
    ```
 
    Generate `MCP_SECRET` with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
-4. Build and start: `docker build -t ahg/glam-mcp:phase2 . && docker compose up -d`, then check `curl 127.0.0.1:8031/healthz`.
-5. Put the two endpoints behind HTTPS on your own name. `docs/nginx-mcp.theahg.co.za.conf` is a working example to copy and rename.
-6. Run `tests/no_leak.py` against your catalogue before opening it to anyone.
+4. Start it: either pull the ready-made image (`docker pull ghcr.io/archiveheritagegroup/ahg-archives-mcp:latest`, and set `image:` in `docker-compose.yml` to it) or build your own (`docker build -t ahg/glam-mcp:phase2 .`); then `docker compose up -d` and check `curl 127.0.0.1:8031/healthz`.
+5. Check the service user's key reads only what a visitor sees: `docker run --rm ghcr.io/archiveheritagegroup/ahg-archives-mcp python -m glam_mcp.keycheck https://catalogue.example.org <key>`.
+6. Put the two endpoints behind HTTPS on your own name. `docs/nginx-mcp.theahg.co.za.conf` is a working example to copy and rename.
+7. Run `tests/no_leak.py` against your catalogue before opening it to anyone.
 
 A required setting that is missing stops the server at start with its name, rather than falling back to someone else's catalogue.
 
@@ -90,6 +91,8 @@ A required setting that is missing stops the server at start with its name, rath
 | `GLAM_DATA` | No | Where sign-in tokens are kept (hashed, keys encrypted). |
 | `GLAM_CALL_LOG` | No | Optional JSON-lines log of tool calls. |
 | `GLAM_PROPOSAL_CAP` | No | Proposal items one signed-in person may queue per hour (default 200). |
+| `GLAM_OTHER_CATALOGUES` | No | Further catalogues to read, as JSON (see Several catalogues). |
+| `GLAM_DEMO_DAYS` | No | Days a demo catalogue added at `/catalogues` lasts (default 7). |
 | `GLAM_USAGE_LOGS` | No | Signed-in service only: comma-separated call logs for the staff usage page at `/usage` (default: its own log). Add the public service's log to see both. |
 
 The older names (`PSIS_PUBLIC_BASE`, `PSIS_API_BASE`, `PSIS_API_KEY`, `GLAM_SOURCE_LABEL`, `GLAM_PUBLIC_BASE`, `GLAM_SECRET`) are still accepted.
@@ -107,6 +110,24 @@ A catalogue that cannot be reached at start-up is left out with a warning. Each 
 **Demo catalogues.** For a show and tell, catalogue administrators and editors can add a client's catalogue on the signed-in service's `/catalogues` page: a name, its address and a read-only key from it. Agents then find it in `list_catalogues` and read it with `catalogue="<name>"`. It lapses after `GLAM_DEMO_DAYS` (7) days. Addresses inside the host's own network are refused. Both services read the list from `<GLAM_DATA>/demo-catalogues.json`, so they share it without a restart.
 
 To run the no-leak test through a second catalogue, set `TEST_CATALOGUE` to its name.
+
+## Ready-made image
+
+Each version tag (`v0.4.0` and on) runs the no-leak tests and then publishes `ghcr.io/archiveheritagegroup/ahg-archives-mcp`, tagged with the version and `latest` (`.github/workflows/image.yml`). Pin a version in production.
+
+## Hosted clients
+
+`hosting/client.sh` runs the service for other institutions' catalogues on one host, one pair of services (signed-in and public) per client, each with its own address, sign-in secret, logs, usage page and demo catalogues:
+
+    hosting/client.sh add <client> "<Catalogue name>" <catalogue-url> [host]   # asks for the client's service key
+    hosting/client.sh publish <client>    # nginx site and certificate (sudo), once DNS for the host resolves
+    hosting/client.sh check <client>      # health, and the key check again
+    hosting/client.sh list
+    hosting/client.sh remove <client>     # stops it, deletes key and secret, keeps the logs
+
+The host defaults to `<client>.mcp.theahg.co.za`, ports are taken from 8041 up, and each client's settings live in `clients/<client>/.env` (mode 600, not in git). `GLAM_IMAGE` picks the image.
+
+Before anything starts, the client's key is checked (`glam_mcp/keycheck.py`): a key that may list everyone's proposals is a staff key and is refused, and a sample of the newest records it reads must each open for a visitor on the public site. That is a spot check; the full check is `tests/no_leak.py` with the catalogue's database, which the client can run. The same key check guards the demo catalogues page.
 
 ## Usage figures
 
