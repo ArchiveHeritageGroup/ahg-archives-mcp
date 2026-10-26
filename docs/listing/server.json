@@ -1,0 +1,26 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "za.co.theahg/ahg-archives",
+  "title": "AHG Archives",
+  "description": "Search and read AtoM archival catalogues with citable links; staff propose access points, dates, relationships, transcriptions and translations for archivist review.",
+  "version": "1.0.0",
+  "websiteUrl": "https://www.atom-extensions.com",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://mcp.theahg.co.za/public/mcp"
+    },
+    {
+      "type": "streamable-http",
+      "url": "https://mcp.theahg.co.za/mcp",
+      "headers": [
+        {
+          "name": "Authorization",
+          "description": "Bearer followed by your catalogue API key (staff, or a personal read-only key from AHG). Browser clients can sign in with OAuth instead.",
+          "isRequired": false,
+          "isSecret": true
+        }
+      ]
+    }
+  ]
+}

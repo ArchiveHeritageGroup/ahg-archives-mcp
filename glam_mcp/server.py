@@ -243,7 +243,9 @@ def _logged(tool: str, args: dict, ctx: Context | None, fn):
         return {"found": False, "message": "The catalogue could not be reached. Try again later.", "source": SOURCE}
     finally:
         log.info(json.dumps({
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "tool": tool, "args": args, "caller": "own-key" if _caller_key(ctx) else "public",
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "tool": tool, "args": args, "caller": "own-key" if (ck := _caller_key(ctx)) else "public",
+            # Tells one person's calls from another's for usage figures; reveals nothing of the key.
+            **({"key": hashlib.sha256(ck.encode()).hexdigest()[:8]} if ck else {}),
             "outcome": outcome, "results": count, "ms": int((time.time() - start) * 1000),
         }))
 
@@ -915,6 +917,13 @@ async def healthz(request: Request) -> JSONResponse:
     except Exception:
         ok = False
     return JSONResponse({"status": "ok" if ok else "degraded", "backend": BACKEND, "auth": AUTH_MODE, "source": SOURCE, "api": ok}, status_code=200 if ok else 503)
+
+
+if AUTH_MODE == "oauth":
+    # Staff usage figures (#10), on the signed-in service only; it reads both services' logs.
+    from glam_mcp.usage import make_usage_route
+    _logs = [p for p in os.environ.get("GLAM_USAGE_LOGS", CALL_LOG).split(",") if p]
+    mcp.custom_route("/usage", methods=["GET", "POST"])(make_usage_route(API_BASE, KEY_HEADER, USER_AGENT, SOURCE, _logs))
 
 
 def main() -> None:

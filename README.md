@@ -4,6 +4,14 @@ An MCP server for AtoM and Heratio catalogues. It lets an assistant work with a 
 
 In development. See it in action on AtoM: [AtoM MCP Server in Action](https://youtu.be/n6snV-lgH_Y).
 
+## Try it
+
+- **Without a key:** connect any MCP client to `https://mcp.theahg.co.za/public/mcp`. Read-only, published records of the PSIS demonstration catalogue.
+- **With a personal read-only key:** for testing on your own agent, ask support@theahg.co.za for a key (name, organisation, what you want to try, for how long). It reads what a visitor sees, has an end date and a daily limit, and works with `https://mcp.theahg.co.za/mcp`. Suggesting needs a staff key.
+- Every key has an hourly limit; each person may make at most 200 suggestions an hour. A used-up limit answers in plain words with the time it resets.
+
+The quick-start guide (`docs/AHG_Archives_MCP_Quick_Start.md`) covers connecting browser and desktop clients, good questions, and suggesting improvements.
+
 ## Tools
 
 | Tool | What it does |
@@ -79,10 +87,15 @@ A required setting that is missing stops the server at start with its name, rath
 | `GLAM_DATA` | No | Where sign-in tokens are kept (hashed, keys encrypted). |
 | `GLAM_CALL_LOG` | No | Optional JSON-lines log of tool calls. |
 | `GLAM_PROPOSAL_CAP` | No | Proposal items one signed-in person may queue per hour (default 200). |
+| `GLAM_USAGE_LOGS` | No | Signed-in service only: comma-separated call logs for the staff usage page at `/usage` (default: its own log). Add the public service's log to see both. |
 
 The older names (`PSIS_PUBLIC_BASE`, `PSIS_API_BASE`, `PSIS_API_KEY`, `GLAM_SOURCE_LABEL`, `GLAM_PUBLIC_BASE`, `GLAM_SECRET`) are still accepted.
 
 `docs/AHG_Archives_MCP_Quick_Start.md` is the guide for archivists using AHG's hosted service: connecting, checking it works, asking good questions and reviewing proposals.
+
+## Usage figures
+
+The signed-in service serves a staff page at `/usage`: calls per day, per tool, per service, per outcome and per key over the last 30 days, and what became of proposals (pending, accepted, rejected, by kind). It opens for a catalogue key that may list everyone's proposals (administrators and editors); the key is used for that page only. Keys appear as the first 8 characters of a hash. Point `GLAM_USAGE_LOGS` at both services' logs, and route `/usage` to the signed-in service in nginx (see `docs/nginx-mcp.theahg.co.za.conf`).
 
 ## Tests
 

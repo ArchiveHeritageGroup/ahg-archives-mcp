@@ -10,9 +10,9 @@ How to connect an AI assistant to an AHG catalogue, check that the connection wo
 | Prepared for | Archivists, cataloguers and researchers using AHG catalogues |
 | Author | Dr Johan Pieterse |
 | Organisation | The Archive and Heritage Digital Commons Group (Pty) Ltd |
-| Version | 1.1 |
+| Version | 1.2 |
 | Status | Pilot |
-| Date | 21 October 2026 |
+| Date | 25 October 2026 |
 | Service address | https://mcp.theahg.co.za/mcp |
 | First catalogue | PSIS - AHG Extensions for AtoM demonstration catalogue |
 
@@ -33,9 +33,11 @@ The pilot catalogue is PSIS, the AHG demonstration site. Other catalogues can be
 | Search descriptions by keyword | See drafts, embargoed, classified or otherwise restricted records |
 | Read a description in full: dates, names, subjects, places, notes, extent | Show anything a public visitor of the catalogue could not see, unless you connect with your own staff key |
 | Show where a record sits: the path up to its fonds, and the records below it | Change a record directly |
-| Read authority records (people, families, organisations) | Delete or move anything |
-| Point to a record's images in a IIIF viewer | Work without a link back to the record |
-| Suggest access points, dates and field text, with evidence, for review (staff only) | Approve its own suggestions |
+| Read authority records (people, families, organisations), and find existing ones by name | Delete or move anything |
+| Read the text held for a record's files, and look at a page image | Work without a link back to the record |
+| Point to a record's images in a IIIF viewer | Approve its own suggestions |
+| Suggest access points, dates, field text, relationships between people, transcriptions and translations, with evidence, for review (staff only) | Make more than 200 suggestions an hour for one person |
+| Work through every record below a fonds or series, a batch at a time | |
 
 : Scope
 
@@ -99,10 +101,24 @@ Most assistants let you choose, per tool, whether it may run without asking. A s
 
 | Tools | Setting |
 |---|---|
-| Search records, Get record, Get children, Get authority, Get IIIF manifest | Always allow: they only read |
-| Propose access points and dates, Propose description change | Needs approval: you see each suggestion before it is sent for review |
+| Search records, Get record, Get children, Get authority, Search authorities, Get IIIF manifest, Get record text, Get record image, Work through series, List my proposals | Always allow: they only read |
+| Propose access points and dates, Propose relationships, Propose description change, Propose transcription, Propose translation | Needs approval: you see each suggestion before it is sent for review |
 
 : Recommended tool permissions
+
+## 3.6 A personal read-only key (trying it on your own agent)
+
+The public address in 3.1 needs no key and is the easiest way to look around. If you want to load AHG Archives into your own agent or application and test it properly, ask AHG for a personal read-only key.
+
+Write to support@theahg.co.za with your name, your organisation, what you would like to try, and for how long. AHG issues the key to an account with no staff rights, so it reads exactly what a visitor sees and nothing more. It has an end date and a daily limit, and AHG can switch it off at any time.
+
+Use it like a staff key: in a browser-based assistant as in 3.3, or in a desktop app or your own client as in 3.4, with the address https://mcp.theahg.co.za/mcp. Over the public address it gives you your own limits instead of a shared one, and your calls can be told apart when you ask how your tests went.
+
+Suggestions are refused with a read-only key (the message says a write scope is required): suggesting is for catalogue staff.
+
+## 3.7 Limits
+
+Every key has an hourly limit, and a personal key also has a daily one. When a limit is used up the assistant is told so in plain words, with the time it resets; nothing is lost, so ask again later. Each person may also make at most 200 suggestions an hour, so that no single session floods the review screens.
 
 # 4. Check that it works
 
@@ -144,6 +160,16 @@ What happens next:
 2. **Field text** (scope and content, archival history, extent and medium, arrangement, conditions of access, conditions of reproduction) goes to **AI > Suggest review**. You see the current and the suggested text side by side, with the evidence and sources, and you can edit before approving.
 3. **Nothing changes on the record until you approve.** Every suggestion records who asked for it.
 
+Before suggesting a name or place, the assistant can look it up among the catalogue's existing authority records. When it finds the same person, it says so, and **Authority Resolution** lists that record first, marked *Proposed*, so linking it takes one click.
+
+Three more kinds of suggestion arrive in the same review screens:
+
+- **Relationships** between people or organisations that a record states, such as a marriage or parent and child in a family register, go to **AI > Relationship review**. Approve links both names to authority records first; once approved, the relationship shows on both records.
+- **Transcriptions** of a scanned page with no text go to **AI > Suggest review**, with the page image beside the proposed text. Once approved, the transcription is the file's text and the record can be found by it.
+- **Translations** of a field into another language also go to **AI > Suggest review**, labelled with the language.
+
+To go through a whole fonds or series, ask the assistant to work through it: it takes the records below a batch at a time and keeps a running count of what it suggested where. Ask "Using AHG Archives, list my proposals" to see what became of your suggestions; the assistant uses the same list to avoid repeating one that was rejected.
+
 Suggesting the same value twice does nothing: the catalogue skips what is already waiting or already linked.
 
 # 7. Good practice
@@ -163,12 +189,14 @@ Suggesting the same value twice does nothing: the catalogue skips what is alread
 | "No visible record with that reference" | The record does not exist, or you may not see it. Both answer the same, on purpose. |
 | "Not authorised" when suggesting | Your account may not edit that record. |
 | The assistant answers without links | It did not use the connector. Name it in the question. |
+| "Write scope required" when suggesting | You are using a read-only key (3.6). Suggesting needs a staff key. |
+| "... limit ... is used up" | Your key's hourly or daily limit, or the 200 suggestions an hour, is reached (3.7). Try again after the time given. |
 | The connector cannot be reached | Try again shortly. If it persists, contact AHG. |
 
 : Troubleshooting
 
 # 9. Behind the scenes
 
-The connector reads the catalogue only through its public interface, with the same access rules as the website: published records only, and nothing an embargo, security classification, donor restriction or cultural protocol hides. Personal information is redacted as it is on the site. Each call is logged, so the institution can see what was asked. Sign-in tokens are stored only as hashes, and the catalogue key behind each one is stored encrypted. Requests are rate-limited to keep the catalogue responsive.
+The connector reads the catalogue only through its public interface, with the same access rules as the website: published records only, and nothing an embargo, security classification, donor restriction or cultural protocol hides. Personal information is redacted as it is on the site. Each call is logged, so the institution can see what was asked. Sign-in tokens are stored only as hashes, and the catalogue key behind each one is stored encrypted. Each key has an hourly limit, and may have a daily one and an end date, to keep the catalogue responsive.
 
 Questions and feedback: Dr Johan Pieterse, johan@theahg.co.za.
