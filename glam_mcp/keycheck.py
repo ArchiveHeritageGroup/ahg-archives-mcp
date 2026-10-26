@@ -34,7 +34,10 @@ full check. Stock AtoM is read through the visitor check anyway (server.py).
   python -m glam_mcp.keycheck <catalogue-url> <key>     exit 0 when fit
 """
 
+import ipaddress
+import socket
 import sys
+from urllib.parse import urlparse
 
 import httpx
 
@@ -57,6 +60,21 @@ def detect_backend(public_base: str, key: str) -> str:
             pass
     raise SystemExit(f"GLAM_BACKEND=auto: {public_base} answers neither /api/v2 (AHG) nor /api (stock AtoM REST API); "
                      "check CATALOGUE_URL and that the API plugin is enabled, or set GLAM_BACKEND")
+
+
+def not_public(url: str) -> str | None:
+    """Why this address may not be added, or None. Only http(s) to public
+    addresses: the service must not be turned on our own network."""
+    u = urlparse(url)
+    if u.scheme not in ("http", "https") or not u.hostname:
+        return "Give the catalogue's full web address, starting https://"
+    try:
+        addrs = {ipaddress.ip_address(a[4][0]) for a in socket.getaddrinfo(u.hostname, u.port or 443)}
+    except (socket.gaierror, ValueError):
+        return f"{u.hostname} cannot be found."
+    if any(not a.is_global for a in addrs):
+        return f"{u.hostname} is not a public address."
+    return None
 
 
 def check(url: str, key: str, backend: str) -> str | None:

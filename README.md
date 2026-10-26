@@ -89,7 +89,8 @@ A required setting that is missing stops the server at start with its name, rath
 | `MCP_SIGNED_IN_URL` | No | Where the public endpoint tells people to sign in to propose changes. |
 | `GLAM_HTTP_PATH` | No | Endpoint path, e.g. `/mcp` or `/public/mcp`. |
 | `GLAM_DATA` | No | Where sign-in tokens are kept (hashed, keys encrypted). |
-| `GLAM_CALL_LOG` | No | Optional JSON-lines log of tool calls. |
+| `GLAM_CALL_LOG` | No | Optional JSON-lines log of tool calls: tool, catalogue, outcome, and for free text (search words, names, proposed text) only its length and a short hash. Readable by the service's user only, one file a day. |
+| `GLAM_LOG_DAYS` | No | Days of call logs kept before deletion (default 90). |
 | `GLAM_PROPOSAL_CAP` | No | Proposal items one signed-in person may queue per hour (default 200). |
 | `GLAM_OTHER_CATALOGUES` | No | Further catalogues to read, as JSON (see Several catalogues). |
 | `GLAM_DEMO_DAYS` | No | Days a demo catalogue added at `/catalogues` lasts (default 7). |
@@ -134,6 +135,10 @@ Before anything starts, the client's key is checked (`glam_mcp/keycheck.py`): a 
 The signed-in service serves a staff page at `/usage`: calls per day, per tool, per service, per outcome and per key over the last 30 days, and what became of proposals (pending, accepted, rejected, by kind). It opens for a catalogue key that may list everyone's proposals (administrators and editors); the key is used for that page only. Keys appear as the first 8 characters of a hash. Point `GLAM_USAGE_LOGS` at both services' logs, and route `/usage` to the signed-in service in nginx (see `docs/nginx-mcp.theahg.co.za.conf`).
 
 ## Tests
+
+`tests/test_server.py` and `tests/test_auth.py` run against a fake catalogue, with no network: every read tool's answers and refusals (401, 403, 404, 429, 501, 500), catalogue choice and keys, image fetching (own host only, no redirects, image types only, size limit), stock AtoM field filtering, the hourly proposal limit, the key check, log contents, and sign-in (hashed tokens, encrypted keys, single-use codes, rotation, revocation, a key revoked at the catalogue). CI runs them on every push:
+
+    docker run --rm -v "$PWD/tests:/app/tests:ro" ahg/glam-mcp:phase2 python -m unittest discover -s tests -p 'test_*.py'
 
 `tests/no_leak.py` checks that hidden records (drafts and, with the AHG extensions, embargoed, classified and ICIP-restricted records) never come back through any tool: not by reference, not in search, not among children, not named in a visible record's hierarchy. On every push, GitHub Actions starts a throwaway stock AtoM 2.10.2 with published and draft records (`tests/stock-atom`), runs the public service against it and runs the test (`.github/workflows/no-leak.yml`). To run it by hand:
 

@@ -28,6 +28,7 @@ that one request and not kept. ponytail: no session, so the key is entered on
 each visit; add one if the page is used daily.
 """
 
+import glob
 import html
 import json
 from collections import Counter, defaultdict
@@ -86,6 +87,8 @@ def _table(head: list[str], rows: list, numeric_from: int = 1) -> str:
 
 def _read_logs(paths: list[str], since: datetime) -> list[dict]:
     out = []
+    # Each log rotates daily (calls.jsonl.2026-10-25 ...); read the kept days too.
+    paths = [p for base in paths for p in [base, *sorted(glob.glob(glob.escape(base) + ".*"))]]
     for path in paths:
         service = "public" if "public" in path else "signed-in"
         try:

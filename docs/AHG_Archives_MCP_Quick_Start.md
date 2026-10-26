@@ -226,6 +226,6 @@ On standard AtoM the connector can search and read descriptions and names, and w
 
 # 10. Behind the scenes
 
-The connector reads the catalogue only through its public interface, with the same access rules as the website: published records only, and nothing an embargo, security classification, donor restriction or cultural protocol hides. Personal information is redacted as it is on the site. Each call is logged, so the institution can see what was asked. Sign-in tokens are stored only as hashes, and the catalogue key behind each one is stored encrypted. Each key has an hourly limit, and may have a daily one and an end date, to keep the catalogue responsive.
+The connector reads the catalogue only through its public interface, with the same access rules as the website: published records only, and nothing an embargo, security classification, donor restriction or cultural protocol hides. Personal information is redacted as it is on the site. Each call is logged, so the institution can see how the service is used: which tool, which catalogue and the outcome, but not the words of a search or the text of a suggestion. Logs are kept for 90 days. Sign-in tokens are stored only as hashes, and the catalogue key behind each one is stored encrypted. Each key has an hourly limit, and may have a daily one and an end date, to keep the catalogue responsive.
 
 Questions and feedback: Dr Johan Pieterse, johan@theahg.co.za.

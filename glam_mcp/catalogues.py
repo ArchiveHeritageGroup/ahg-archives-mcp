@@ -30,12 +30,9 @@ stored as given (file mode 600); give only a key of a user with no groups.
 """
 
 import html
-import ipaddress
 import json
 import os
-import socket
 import time
-from urllib.parse import urlparse
 
 import httpx
 from starlette.requests import Request
@@ -63,21 +60,6 @@ def _save(rows: list[dict]) -> None:
     with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as f:
         json.dump(rows, f)
     os.replace(tmp, PATH)
-
-
-def _outside_address(url: str) -> str | None:
-    """Why this address may not be added, or None. Only http(s) to public
-    addresses: the service must not be turned on our own network."""
-    u = urlparse(url)
-    if u.scheme not in ("http", "https") or not u.hostname:
-        return "Give the catalogue's full web address, starting https://"
-    try:
-        addrs = {ipaddress.ip_address(a[4][0]) for a in socket.getaddrinfo(u.hostname, u.port or 443)}
-    except (socket.gaierror, ValueError):
-        return f"{u.hostname} cannot be found."
-    if any(not a.is_global for a in addrs):
-        return f"{u.hostname} is not a public address."
-    return None
 
 
 def make_catalogues_route(api_base: str, key_header: str, user_agent: str, source: str, reserved, detect):
@@ -125,7 +107,7 @@ Each one lapses after {DEMO_DAYS} days. For administrators and editors of {html.
             return _page("Demo catalogues", _list("Give it a name not already used.", True), 400)
         if not key:
             return _page("Demo catalogues", _list("Give the catalogue's read-only API key: both kinds of AtoM refuse reads without one.", True), 400)
-        if why := _outside_address(url):
+        if why := keycheck.not_public(url):
             return _page("Demo catalogues", _list(why, True), 400)
         try:
             backend = detect(url, key)

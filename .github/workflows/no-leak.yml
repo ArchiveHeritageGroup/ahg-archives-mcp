@@ -14,6 +14,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - name: Unit tests (fake catalogue, no network)
+        run: |
+          docker build -t glam-mcp .
+          docker run --rm -v "$PWD/tests:/app/tests:ro" glam-mcp python -m unittest discover -s tests -p 'test_*.py'
       - name: Start stock AtoM
         working-directory: tests/stock-atom
         run: |
@@ -22,7 +26,6 @@ jobs:
           echo "READER_KEY=$(grep '^READER_API_KEY=' setup.log | cut -d= -f2)" >> "$GITHUB_ENV"
       - name: Start the MCP (public, read-only)
         run: |
-          docker build -t glam-mcp .
           docker run -d --name mcp --network host -e GLAM_PORT=8099 -e CATALOGUE_URL=http://127.0.0.1:8097 \
             -e CATALOGUE_NAME="Stock AtoM test" -e CATALOGUE_API_KEY="$READER_KEY" glam-mcp
           for i in $(seq 30); do curl -sf http://127.0.0.1:8099/healthz && break; sleep 2; done
