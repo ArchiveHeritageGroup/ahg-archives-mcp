@@ -120,15 +120,16 @@ def check(url: str, key: str, backend: str) -> str | None:
             body = r.json()
             slugs = [d["slug"] for d in (body.get("data", body).get("results") or []) if d.get("slug")]
         elif backend == "openric":
-            # OpenRiC reads need no key: what matters is that every record it lists
-            # opens for a visitor on its public page (@id).
+            # OpenRiC reads need no key, and its API decides visibility (its record
+            # pages send browsers on to a viewer on another host): every record it
+            # lists must also open through the API by its slug.
             r = c.get(url + "/api/ric/v1/records", params={"limit": SAMPLE})
             if r.status_code != 200:
                 return f"The catalogue's OpenRiC API answered {r.status_code}."
-            pages = [i["@id"] for i in (r.json().get("openric:items") or []) if str(i.get("@id", "")).startswith(url)]
-            hidden = [p for p in pages if not _opens(c, p)]
+            slugs = [str(i["@id"]).rstrip("/").rsplit("/", 1)[-1] for i in (r.json().get("openric:items") or []) if i.get("@id")]
+            hidden = [s for s in slugs if c.get(f"{url}/api/ric/v1/records/{s}").status_code != 200]
             if hidden:
-                return f"{len(hidden)} of {len(pages)} sampled records do not open for a visitor (for example {hidden[0]})."
+                return f"{len(hidden)} of {len(slugs)} sampled records do not open through the API (for example {hidden[0]})."
             return None
         else:
             r = c.get(url + "/api/informationobjects", params={"limit": SAMPLE}, headers={"REST-API-Key": key})

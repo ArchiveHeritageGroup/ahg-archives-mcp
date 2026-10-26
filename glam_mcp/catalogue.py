@@ -250,9 +250,24 @@ def _ric_ref(at_id: str | None) -> str | None:
 def ric_search(query: str, n: int, s: int, types: str = "Record") -> list[dict]:
     """Title search through OpenRiC's autocomplete (it has no full-text search
     and no paging, so skip is applied here). Each hit: id, label, type."""
-    hits = _api("GET", "/autocomplete", params={"q": query, "limit": min(s + n, 50)})
+    plural = ",".join(t.lower() + "s" for t in types.split(","))  # Record -> records
+    hits = _api("GET", "/autocomplete", params={"q": query, "types": plural, "limit": min(s + n, 50)})
     hits = hits if isinstance(hits, list) else []
     return [h for h in hits if h.get("type") in types.split(",")][s:s + n]
+
+
+def _ric_dates(d: dict) -> list[dict]:
+    """openricx:hasDateRangeSet: each range as {"date": "1880 - 1950", "type": "creation"}."""
+    out = []
+    for r in d.get("openricx:hasDateRangeSet") or []:
+        if not isinstance(r, dict):
+            continue
+        text = _ric_label(r.get("rico:expressedDate")) or " - ".join(
+            t for t in (_ric_label(r.get("rico:beginningDate")), _ric_label(r.get("rico:endDate"))) if t)
+        kind = str((r.get("rico:hasDateType") or {}).get("@id", "")).rstrip("/").rsplit("/", 1)[-1]
+        if text:
+            out.append({"date": text, **({"type": kind} if kind else {})})
+    return out
 
 
 def _read_openric(slug: str, key: str | None) -> dict:
@@ -270,7 +285,7 @@ def _read_openric(slug: str, key: str | None) -> dict:
         "found": True, "source": _c.name, "url": d.get("@id"), "slug": slug,
         "title": _ric_label(d.get("rico:title")), "reference_code": _ric_label(d.get("rico:identifier")),
         "level": _ric_label(d.get("rico:type")) or str(d.get("@type", "")).rsplit("#", 1)[-1],
-        "dates": _ric_labels(d.get("rico:isAssociatedWithDate") or d.get("rico:date")) or None,
+        "dates": _ric_dates(d) or None,
         "extent": None, "scope_and_content": _ric_label(d.get("rico:scopeAndContent")),
         "archival_history": _ric_label(d.get("rico:history")), "names": names,
         "subjects": _ric_labels(d.get("rico:hasOrHadSubject")) or None, "places": places or None, "notes": None,

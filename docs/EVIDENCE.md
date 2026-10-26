@@ -11,6 +11,7 @@ Each run builds the image and runs, in it: the unit tests (fake catalogue, no ne
 | v0.5.0 | 7b457dd, 0fb119e | 40270152152, 40270368346 | 40270610809 | 28 |
 | v0.5.1 | b5328ef | 40273801657 | 40274097222 | 28 |
 | v0.5.2 | c8ed851 | 40275062629 | 40275338238 | 39 |
+| v0.6.0 | cae4599 | 40276918954 | 40277201522 | 45 |
 
 ## Item 20: no suggestion bypasses review
 
@@ -25,7 +26,7 @@ Since v0.6.0 no field on stock AtoM comes from its REST API: every value is read
 ## Interoperability (items 16 to 18)
 
 - Heratio: atom-ahg backend unchanged, checked by heratio-dev on Heratio dev with all 17 tools; leak test 40 hidden / 201 checks (as shipped) and 60 hidden / 299 checks (with embargo, classification and ICIP fixtures).
-- OpenRiC: adapter built, unit tested against its real response shapes; held from live use until OpenRiC filters unpublished records.
+- OpenRiC: adapter built and unit tested against its real response shapes; since OpenRiC v0.17.26 (published only) checked locally against ric.theahg.co.za: search, full record with date ranges, children, and a draft answering not found. Leak test pending (needs read access to its database).
 
 ## Pending
 

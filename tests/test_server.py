@@ -365,6 +365,10 @@ RIC_RECORD = {
     "rico:hasOrHadHolder": {"@id": f"https://{RIC}/repository/x", "@type": "rico:CorporateBody", "rico:name": "Example Archive"},
     "rico:hasOrHadSubject": [{"@type": "rico:Thing", "skos:prefLabel": "Families"}, {"@type": "rico:Thing", "skos:prefLabel": "Farms"}],
     "rico:hasOrHadInstantiation": [{"@type": "rico:Instantiation", "rico:identifier": "ph1.jpg"}],
+    "openricx:hasDateRangeSet": [{"@type": "openricx:DateRange", "rico:beginningDate": "1936-01-01", "rico:endDate": "1936-12-31",
+                                  "rico:hasDateType": {"@id": "https://openric.org/vocab/date-type/creation"}},
+                                 {"@type": "openricx:DateRange", "rico:expressedDate": "c. 1936",
+                                  "rico:hasDateType": {"@id": "https://openric.org/vocab/date-type/accumulation"}}],
 }
 
 
@@ -386,7 +390,8 @@ class OpenRiC(Base):
         self.cat.json("GET", f"{api}/records/890/entities", {"places": [{"rico:name": "Graaff-Reinet"}], "rules": []})
         self.cat.json("GET", f"{api}/agents/726", {"@id": f"https://{RIC}/actor/mobrey-family", "@type": "rico:Agent", "rico:name": "Mobrey family"})
         self.cat.json("GET", f"{api}/hierarchy/890", {"entity_id": 890, "class": "QubitInformationObject", "parent": None,
-                                                      "children": [{"id": 891, "title": "Back of the photo", "level": "Item"}]})
+                                                      "children": [{"@id": f"https://{RIC}/informationobject/back", "id": 891, "slug": "back",
+                                                                    "title": "Back of the photo", "level": "Item"}]})
 
     def test_search_cites_each_records_own_page_and_skips_hidden_ones(self):
         r = server.search_records("photo", catalogue="OpenRiC")
@@ -400,6 +405,7 @@ class OpenRiC(Base):
         self.assertEqual(r["subjects"], ["Families", "Farms"])
         self.assertEqual((r["names"], r["places"]), (["Mobrey family"], ["Graaff-Reinet"]))
         self.assertEqual(r["url"], f"https://{RIC}/informationobject/photo-taken-1936")
+        self.assertEqual(r["dates"], [{"date": "1936-01-01 - 1936-12-31", "type": "creation"}, {"date": "c. 1936", "type": "accumulation"}])
 
     def test_hidden_record_and_problem_details(self):
         r = server.get_record("999", catalogue="OpenRiC")
@@ -409,7 +415,10 @@ class OpenRiC(Base):
         self.assertEqual(server.get_record("890", catalogue="OpenRiC")["message"], "60 requests a minute")
 
     def test_children_agents_and_what_it_does_not_offer(self):
-        self.assertEqual(server.get_children("890", catalogue="OpenRiC")["results"][0]["slug"], "891")
+        kid = server.get_children("890", catalogue="OpenRiC")["results"][0]
+        self.assertEqual((kid["slug"], kid["title"], kid["url"]), ("891", "Back of the photo", f"https://{RIC}/informationobject/back"))
+        server.search_records("photo", catalogue="OpenRiC")
+        self.assertEqual([q.url.params.get("types") for q in self.cat.seen if q.url.path.endswith("/autocomplete")][-1], "records")
         self.assertEqual(server.search_authorities("mobrey", catalogue="OpenRiC")["results"][0]["id"], 726)
         self.assertEqual(server.get_authority("726", catalogue="OpenRiC")["name"], "Mobrey family")
         self.assertIn("does not publish file text", server.get_record_text("890", catalogue="OpenRiC")["message"])
@@ -428,8 +437,8 @@ class OpenRiC(Base):
     def test_key_check_needs_every_listed_record_to_open_for_a_visitor(self):
         self.cat.json("GET", f"{RIC}/api/ric/v1/records", {"openric:items": [
             {"@id": f"https://{RIC}/informationobject/public-one"}, {"@id": f"https://{RIC}/informationobject/draft-one"}]})
-        self.cat.routes[("GET", f"{RIC}/informationobject/public-one")] = httpx.Response(200, text="<html>")
-        self.assertIn("1 of 2 sampled records", keycheck.check(f"https://{RIC}", "", "openric"))
+        self.cat.json("GET", f"{RIC}/api/ric/v1/records/public-one", {"@id": f"https://{RIC}/informationobject/public-one"})
+        self.assertIn("1 of 2 sampled records do not open through the API", keycheck.check(f"https://{RIC}", "", "openric"))
 
 
 class NoWritePath(unittest.TestCase):
