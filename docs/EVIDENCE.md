@@ -14,6 +14,7 @@ Each run builds the image and runs, in it: the unit tests (fake catalogue, no ne
 | v0.6.0 | cae4599 | 40276918954 | 40277201522 | 45 |
 | v0.6.1 | 228793f | 40280263236 | 40280581094 | 45 |
 | v0.7.0 | 6b78635 | 40286950987 | 40287333136 | 52 |
+| v0.7.1 | 8dada92 | 40325621922 | 40325748046 | 52 |
 
 ## Item 20: no suggestion bypasses review
 
