@@ -1,6 +1,6 @@
 # AHG Archives MCP server
 
-[![M8ven Score](https://m8ven.ai/badge/mcp/archiveheritagegroup/ahg-archives-mcp)](https://m8ven.ai/mcp/archiveheritagegroup/ahg-archives-mcp?s=readme)
+[![M8ven Score](https://m8ven.ai/badge/mcp/archiveheritagegroup-ahg-archives-mcp-1xxt0t?v=68d5e926cef5dd67beb7f65c24458173)](https://m8ven.ai/mcp/archiveheritagegroup-ahg-archives-mcp-1xxt0t?s=readme)
 
 An MCP server for archival catalogues: stock AtoM, AtoM with the AHG Extensions, Heratio and OpenRiC. It lets an assistant work with a catalogue the way an archivist would: find records, read them with their children, images, text and provenance, and propose improvements. Nothing it proposes changes a record until an archivist reviews and approves it.
 
