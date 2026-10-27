@@ -773,3 +773,39 @@ class WorkspaceRights(Base):
         self.files()
         self.assertEqual(server.get_record_text(U)["results"][0]["rights"]["use"], "not_stated")
 
+
+
+class AhgRights(Base):
+    """AtoM with the AHG Extensions (and Heratio): the API's rights block, in the Workspace shape."""
+
+    def record(self, rights):
+        self.cat.json("GET", "cat.example.org/api/v2/descriptions/rec", {"title": "Rock art panel", "rights": rights,
+            "digital_objects": [{"reference_url": "/uploads/x.png"}]})
+        self.cat.json("GET", "cat.example.org/api/v2/descriptions/rec/text", {"texts": [{"source": "ocr", "text": "Eland."}]})
+        self.cat.routes[("GET", "cat.example.org/uploads/x.png")] = httpx.Response(200, content=PNG, headers={"content-type": "image/png"})
+
+    def test_a_secret_sacred_label_withholds_image_and_text(self):
+        # ahgRightsPlugin stores Secret/Sacred as "TK-SS"; the API sends it as tk_s.
+        self.record({"rules": [], "labels": [{"code": "tk_s", "label": "TK Secret/Sacred", "source_code": "TK-SS"}]})
+        out = server.get_record_image("rec")
+        self.assertEqual((len(out), json.loads(out[0])["withheld"]), (1, True))
+        self.assertFalse([q for q in self.cat.seen if q.url.path == "/uploads/x.png"])
+        t = server.get_record_text("rec")
+        self.assertEqual((t["withheld"], t["results"]), (True, []))
+
+    def test_rights_the_catalogue_could_not_read_withhold(self):
+        self.record({"rules": [], "labels": [], "unavailable": True})
+        self.assertTrue(json.loads(server.get_record_image("rec")[0])["withheld"])
+
+    def test_a_statement_comes_with_the_image(self):
+        self.record({"rules": [{"statement": {"iri": "http://rightsstatements.org/vocab/InC/1.0/", "code": "InC", "label": "In Copyright"},
+                                "licence": None, "holder": None, "grants": {}}], "labels": []})
+        out = server.get_record_image("rec")
+        self.assertEqual((len(out), json.loads(out[0])["rights"]["statements"][0]["code"]), (2, "InC"))
+
+    def test_an_api_without_rights_is_unchanged(self):
+        self.cat.json("GET", "cat.example.org/api/v2/descriptions/rec", {"title": "Old API", "digital_objects": [{"reference_url": "/uploads/x.png"}]})
+        self.cat.routes[("GET", "cat.example.org/uploads/x.png")] = httpx.Response(200, content=PNG, headers={"content-type": "image/png"})
+        out = server.get_record_image("rec")
+        self.assertEqual(len(out), 2)
+        self.assertNotIn("rights", json.loads(out[0]))

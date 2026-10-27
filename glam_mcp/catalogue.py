@@ -136,6 +136,9 @@ def _read_ahg(slug: str, key: str | None) -> dict:
         "part_of": [{"title": a.get("title"), "url": _url(a["slug"])} for a in d.get("hierarchy", []) if a.get("slug")],
         "children_count": d.get("children_count", 0),
         "provenance": d.get("provenance"),
+        # Rights and Local Contexts labels (AHG API, Workspace shape); absent on
+        # catalogues whose API predates them.
+        "rights": d.get("rights"),
         "images": [
             {"thumbnail": _file_url(o.get("thumbnail_url")), "reference": _file_url(o.get("reference_url")),
              "iiif_manifest": f"{_c.public_base}/iiif/manifest/{slug}"}
@@ -435,9 +438,11 @@ def ric_rights(*parts: dict | None) -> dict:
     instantiations (the later part wins for the same act), as the assistant
     should read them: the statements, licences and acts in force, the Local
     Contexts labels, and whether the file may be handed over at all.
-    use: "withheld" (a no-reuse label, or render/disseminate/use disallowed),
-    "conditions" (anything else stated) or "not_stated"."""
+    use: "withheld" (a no-reuse label, render/disseminate/use disallowed, or
+    rights the catalogue could not read), "conditions" (anything else stated) or
+    "not_stated". The AHG API sends the same shape (ApiRights)."""
     statements, licences, labels, acts = [], [], [], {}
+    unreadable = any((part or {}).get("unavailable") for part in parts)
     for part in parts:
         for rule in (part or {}).get("rules") or []:
             for kind, out in (("statement", statements), ("licence", licences)):
@@ -449,7 +454,8 @@ def ric_rights(*parts: dict | None) -> dict:
         for lab in (part or {}).get("labels") or []:
             if lab.get("code") not in [x["code"] for x in labels]:
                 labels.append({"code": lab.get("code"), "label": lab.get("label"), "url": lab.get("iri")})
-    blocked = [x["label"] or x["code"] for x in labels if x["code"] in NO_REUSE_LABELS] + \
+    blocked = (["the catalogue could not read this record's rights"] if unreadable else []) + \
+              [x["label"] or x["code"] for x in labels if x["code"] in NO_REUSE_LABELS] + \
               [f"{a} disallowed" for a in NO_SHOW_ACTS if acts.get(a, {}).get("restriction") == "disallow"]
     use = "withheld" if blocked else "conditions" if (statements or licences or labels or acts) else "not_stated"
     out = {"use": use, "statements": statements, "licences": licences, "acts": acts, "labels": labels}

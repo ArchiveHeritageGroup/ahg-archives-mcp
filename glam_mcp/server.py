@@ -406,7 +406,7 @@ def get_record_text(slug: str, offset: int = 0, limit: int = 20000, catalogue: s
     Use it for documents, where reading the text beats looking at a small image.
     Long text comes in pages: if a result says more=true, call again with
     offset set to offset + the length you received. Personal information may be
-    masked. Quote what you rely on when you propose changes. Where the catalogue states rights (OpenRiC Workspace), each result carries
+    masked. Quote what you rely on when you propose changes. Where the catalogue states rights (OpenRiC Workspace, AtoM with the AHG Extensions, Heratio), each result carries
     rights: RightsStatements.org statements, Creative Commons licences, what may
     be done (PREMIS acts: allow, disallow, conditional) and Local Contexts labels.
     Follow them when you quote or reuse anything, and say what they are. A file
@@ -427,7 +427,14 @@ def get_record_text(slug: str, offset: int = 0, limit: int = 20000, catalogue: s
         if not texts:
             return {"found": True, "source": _c.name, "url": _url(slug), "results": [],
                     "message": d.get("note") or "No text is held for this record's files. For an image, use get_record_image."}
-        return {"found": True, "source": _c.name, "url": _url(slug), "results": texts}
+        raw = _api("GET", f"/descriptions/{slug}", key).get("rights")
+        if raw is None:  # an AHG API from before rights were published
+            return {"found": True, "source": _c.name, "url": _url(slug), "results": texts}
+        rights = adapters.ric_rights(raw)
+        if "withheld" == rights["use"]:
+            return {"found": True, "source": _c.name, "url": _url(slug), "rights": rights, "withheld": True, "results": [],
+                    "message": "The text of this record's files is not given: " + rights["why"] + ". Do not describe or reuse it."}
+        return {"found": True, "source": _c.name, "url": _url(slug), "rights": rights, "results": texts}
     return _logged("get_record_text", args, ctx, run)
 
 
@@ -474,7 +481,7 @@ def get_record_image(slug: str, catalogue: str = "", ctx: Context | None = None)
     Use it before proposing a description for a record whose own text is thin.
     Only images the caller may view are returned (the reference copy, never the
     master). Say what you saw and what you inferred, and treat inscriptions you
-    cannot read clearly as uncertain. Where the catalogue states rights (OpenRiC Workspace), each result carries
+    cannot read clearly as uncertain. Where the catalogue states rights (OpenRiC Workspace, AtoM with the AHG Extensions, Heratio), each result carries
     rights: RightsStatements.org statements, Creative Commons licences, what may
     be done (PREMIS acts: allow, disallow, conditional) and Local Contexts labels.
     Follow them when you quote or reuse anything, and say what they are. A file
@@ -493,17 +500,20 @@ def get_record_image(slug: str, catalogue: str = "", ctx: Context | None = None)
         rights = None
         if _c.backend == "openric" and adapters.ric_workspace(slug):
             title, url, ref, rights = _ric_image(slug, key)  # Workspace answers 404 for a record that is not public
-            if ref and "withheld" == rights["use"]:
-                outcome = "withheld"
-                return [json.dumps({"source": _c.name, "url": url, "title": title, "withheld": True, "rights": rights,
-                                    "message": "This image is not shown: " + rights["why"] + ". Do not describe or reuse it."})]
+
         elif _c.backend != "atom-ahg":
             outcome = "unsupported"
             return ["This catalogue's API does not publish record images."]
         else:
             rec = _read_ahg(slug, key)  # the API decides whether this caller may see the record and its files
             title, url = rec["title"], rec["url"]
+            if rec.get("rights") is not None:
+                rights = adapters.ric_rights(rec["rights"])
             ref = next((i.get("reference") or i.get("thumbnail") for i in rec["images"] if i.get("reference") or i.get("thumbnail")), None)
+        if ref and rights and "withheld" == rights["use"]:
+            outcome = "withheld"
+            return [json.dumps({"source": _c.name, "url": url, "title": title, "withheld": True, "rights": rights,
+                                "message": "This image is not shown: " + rights["why"] + ". Do not describe or reuse it."})]
         if not ref:
             outcome = "no_image"
             return [f"{title} ({url}) has no image you may view."]
