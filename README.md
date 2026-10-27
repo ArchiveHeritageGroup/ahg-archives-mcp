@@ -193,6 +193,7 @@ The signed-in service serves a staff page at `/usage`: calls per day, per tool, 
 
 ## Versions
 
+- **v0.9.2** (27 Oct 2026): every tool declares the four MCP tool annotations, so a client can tell reads from writes: the eleven read tools are read-only and idempotent; the five propose tools are not read-only, never destructive (a proposal only joins the review queue) and not idempotent. None is open-world. 79 unit tests.
 - **v0.9.1** (27 Oct 2026): rights and Local Contexts labels from AtoM with the AHG Extensions too (atom-ahg-plugins v3.121.89, the API rights block; Heratio to follow), in get_record as well as with files; rights the catalogue cannot read withhold the file. 78 unit tests.
 - **v0.9.0** (27 Oct 2026): rights and Local Contexts labels from OpenRiC Workspace (v0.0.59): RightsStatements.org statements, Creative Commons licences, PREMIS acts and TK/BC labels come with get_record_text and get_record_image. A file under a no-reuse label (TK Secret/Sacred, Community Use Only, Women or Men Restricted), or one that may not be rendered, disseminated or used, is withheld: the assistant gets the rights, not the content. 74 unit tests.
 - **v0.8.2** (26 Oct 2026): stock AtoM children and children_count come from the visitor's treeview (direct children, paged, drafts left out) instead of the REST API tree, which returns the whole subtree; a large fonds no longer times out or ties up the catalogue. 69 unit tests.

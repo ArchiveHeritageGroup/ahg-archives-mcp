@@ -514,6 +514,21 @@ class OpenRiC(Base):
         self.assertIn("1 of 2 sampled records do not open through the API", keycheck.check(f"https://{RIC}", "", "openric"))
 
 
+class ToolAnnotationHints(unittest.TestCase):
+    """Every tool declares all four hints, and only the propose tools write."""
+
+    def test_every_tool_is_annotated(self):
+        tools = server.mcp._tool_manager.list_tools()
+        self.assertEqual(len(tools), 16)
+        for t in tools:
+            a = t.annotations
+            self.assertIsNotNone(a, t.name)
+            for hint in ("readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"):
+                self.assertIsNotNone(getattr(a, hint), f"{t.name} {hint}")
+            self.assertFalse(a.destructiveHint, t.name)
+            self.assertEqual(a.readOnlyHint, not t.name.startswith("propose_"), t.name)
+
+
 class NoWritePath(unittest.TestCase):
     """Nothing the assistant does can change a record: the only calls the code
     sends that are not reads are a search and the review-queue call. Read from

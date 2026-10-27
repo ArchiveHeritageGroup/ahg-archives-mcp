@@ -61,6 +61,7 @@ from typing import Any, Literal
 import anyio.to_thread
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.utilities.types import Image
+from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -158,7 +159,15 @@ if _provider is not None:
     mcp.custom_route("/login", methods=["POST"])(_provider.login_post)
 
 
-def tool():
+# Tool annotations, so a client can tell a read from a write without guessing.
+# Reads change nothing. A proposal only adds a row to the archivist's review
+# queue: never destructive, but not idempotent, since sending it again files it
+# again. Neither reaches past the configured catalogues, so neither is open-world.
+READ = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
+PROPOSE = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False)
+
+
+def tool(annotations: ToolAnnotations = READ):
     """Register a tool that runs in a worker thread. The tools wait on catalogues
     over HTTP; run in the server's event loop they held every other caller up, so
     the service answered one call at a time (load test, 26 Oct 2026: 11 to 13 calls
@@ -169,7 +178,7 @@ def tool():
         @functools.wraps(fn)
         async def in_thread(*args, **kwargs):
             return await anyio.to_thread.run_sync(functools.partial(fn, *args, **kwargs))
-        mcp.tool()(in_thread)
+        mcp.tool(annotations=annotations)(in_thread)
         return fn
     return register
 
@@ -593,7 +602,7 @@ def list_my_proposals(status: Literal["pending", "approved", "edited", "linked",
     return _logged("list_my_proposals", args, ctx, run)
 
 
-@tool()
+@tool(PROPOSE)
 def propose_access_points_and_dates(slug: str, proposals: list[Proposal], ctx: Context | None = None) -> dict:
     """Propose access points (people, organisations, places) and dates for one record.
 
@@ -682,7 +691,7 @@ class Relationship(BaseModel):
     sources: list[str] = Field(default_factory=list, description="URLs of web sources used, if any.")
 
 
-@tool()
+@tool(PROPOSE)
 def propose_relationships(slug: str, relationships: list[Relationship], ctx: Context | None = None) -> dict:
     """Propose relationships between people or organisations that a record states,
     such as a marriage or parent and child in a family register.
@@ -720,7 +729,7 @@ def propose_relationships(slug: str, relationships: list[Relationship], ctx: Con
     return _logged("propose_relationships", args, ctx, run)
 
 
-@tool()
+@tool(PROPOSE)
 def propose_description_change(
     slug: str,
     field: Literal["title", "scope_and_content", "archival_history", "extent_and_medium", "arrangement", "access_conditions", "reproduction_conditions"],
@@ -765,7 +774,7 @@ def propose_description_change(
     return _logged("propose_description_change", args, ctx, run)
 
 
-@tool()
+@tool(PROPOSE)
 def propose_transcription(slug: str, text: str, digital_object_id: int | str | None = None, evidence: str = "",
                           ctx: Context | None = None) -> dict:
     """Propose a transcription of a record's file, such as a scanned page with no text.
@@ -807,7 +816,7 @@ def propose_transcription(slug: str, text: str, digital_object_id: int | str | N
     return _logged("propose_transcription", args, ctx, run)
 
 
-@tool()
+@tool(PROPOSE)
 def propose_translation(
     slug: str,
     field: Literal["title", "scope_and_content", "archival_history", "extent_and_medium", "arrangement", "access_conditions", "reproduction_conditions"],
