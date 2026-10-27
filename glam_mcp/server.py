@@ -406,7 +406,13 @@ def get_record_text(slug: str, offset: int = 0, limit: int = 20000, catalogue: s
     Use it for documents, where reading the text beats looking at a small image.
     Long text comes in pages: if a result says more=true, call again with
     offset set to offset + the length you received. Personal information may be
-    masked. Quote what you rely on when you propose changes.
+    masked. Quote what you rely on when you propose changes. Where the catalogue states rights (OpenRiC Workspace), each result carries
+    rights: RightsStatements.org statements, Creative Commons licences, what may
+    be done (PREMIS acts: allow, disallow, conditional) and Local Contexts labels.
+    Follow them when you quote or reuse anything, and say what they are. A file
+    whose labels ask for no reuse (TK Secret/Sacred, Community Use Only, Women or
+    Men Restricted), or that may not be shown, is withheld: it is not given to
+    you, and you should not try to describe or obtain it another way.
     """
     key = _read_key(ctx, catalogue)
     args = {"slug": slug, "offset": offset, "limit": limit, "catalogue": catalogue}
@@ -430,22 +436,34 @@ def _ric_text(slug: str, key: str | None, offset: int, limit: int) -> dict:
     in the same shape as the AHG API's file text."""
     d = adapters.ric_files(slug, key)
     url = f"{_c.public_base}/record/{slug}"
-    texts = [{"source": "transcript", "digital_object_id": i.get("id"), "file": i.get("title"), "language": t.get("language"),
-              "text": (t.get("value") or "")[offset:offset + limit], "more": offset + limit < len(t.get("value") or "")}
-             for i in d.get("instantiations", []) for t in i.get("text", []) if t.get("value")]
+    texts = []
+    for i in d.get("instantiations", []):
+        rights = adapters.ric_rights(d.get("rights"), i.get("rights"))
+        for t in i.get("text", []):
+            if not t.get("value"):
+                continue
+            item = {"source": "transcript", "digital_object_id": i.get("id"), "file": i.get("title"), "language": t.get("language"), "rights": rights}
+            if "withheld" == rights["use"]:
+                # Not handed to the assistant at all: see adapters.NO_REUSE_LABELS.
+                texts.append({**item, "withheld": True, "message": "Withheld: " + rights["why"] + "."})
+            else:
+                texts.append({**item, "text": t["value"][offset:offset + limit], "more": offset + limit < len(t["value"])})
     if not texts:
-        return {"found": True, "source": _c.name, "url": url, "results": [],
+        return {"found": True, "source": _c.name, "url": url, "results": [], "rights": adapters.ric_rights(d.get("rights")),
                 "message": "No published transcript is held for this record's files. For an image, use get_record_image."}
-    return {"found": True, "source": _c.name, "url": url, "results": texts}
+    return {"found": True, "source": _c.name, "url": url, "rights": adapters.ric_rights(d.get("rights")), "results": texts}
 
 
-def _ric_image(slug: str, key: str | None) -> tuple[str, str, str | None]:
-    """OpenRiC Workspace: (title, record url, reference or thumbnail image url). Masters are never listed."""
+def _ric_image(slug: str, key: str | None) -> tuple[str, str, str | None, dict]:
+    """OpenRiC Workspace: (title, record url, reference or thumbnail image url,
+    rights of that file). Masters are never listed."""
     d = adapters.ric_files(slug, key)
-    files = [f for i in d.get("instantiations", []) for f in i.get("files", [])]
-    pick = next((f for f in files if f.get("use") == "reference" and str(f.get("mime_type", "")).startswith("image/")), None) \
-        or next((f for f in files if f.get("use") == "thumbnail" and str(f.get("mime_type", "")).startswith("image/")), None)
-    return d.get("title") or slug, f"{_c.public_base}/record/{slug}", adapters._file_url(pick.get("path")) if pick else None
+    is_image = lambda f, use: f.get("use") == use and str(f.get("mime_type", "")).startswith("image/")
+    found = next(((f, i) for use in ("reference", "thumbnail") for i in d.get("instantiations", [])
+                  for f in i.get("files", []) if is_image(f, use)), (None, None))
+    pick, inst = found
+    rights = adapters.ric_rights(d.get("rights"), (inst or {}).get("rights"))
+    return d.get("title") or slug, f"{_c.public_base}/record/{slug}", adapters._file_url(pick.get("path")) if pick else None, rights
 
 
 @tool()
@@ -456,7 +474,13 @@ def get_record_image(slug: str, catalogue: str = "", ctx: Context | None = None)
     Use it before proposing a description for a record whose own text is thin.
     Only images the caller may view are returned (the reference copy, never the
     master). Say what you saw and what you inferred, and treat inscriptions you
-    cannot read clearly as uncertain.
+    cannot read clearly as uncertain. Where the catalogue states rights (OpenRiC Workspace), each result carries
+    rights: RightsStatements.org statements, Creative Commons licences, what may
+    be done (PREMIS acts: allow, disallow, conditional) and Local Contexts labels.
+    Follow them when you quote or reuse anything, and say what they are. A file
+    whose labels ask for no reuse (TK Secret/Sacred, Community Use Only, Women or
+    Men Restricted), or that may not be shown, is withheld: it is not given to
+    you, and you should not try to describe or obtain it another way.
     """
     key = _read_key(ctx, catalogue)
     start = time.time()
@@ -466,8 +490,13 @@ def get_record_image(slug: str, catalogue: str = "", ctx: Context | None = None)
         return [_unknown_catalogue(catalogue)["message"]]
     token = _current.set(cats[catalogue or HOME.name])
     try:
+        rights = None
         if _c.backend == "openric" and adapters.ric_workspace(slug):
-            title, url, ref = _ric_image(slug, key)  # Workspace answers 404 for a record that is not public
+            title, url, ref, rights = _ric_image(slug, key)  # Workspace answers 404 for a record that is not public
+            if ref and "withheld" == rights["use"]:
+                outcome = "withheld"
+                return [json.dumps({"source": _c.name, "url": url, "title": title, "withheld": True, "rights": rights,
+                                    "message": "This image is not shown: " + rights["why"] + ". Do not describe or reuse it."})]
         elif _c.backend != "atom-ahg":
             outcome = "unsupported"
             return ["This catalogue's API does not publish record images."]
@@ -480,7 +509,8 @@ def get_record_image(slug: str, catalogue: str = "", ctx: Context | None = None)
             return [f"{title} ({url}) has no image you may view."]
         data, fmt = _fetch_image(ref)
         out = len(data)
-        return [json.dumps({"source": _c.name, "url": url, "title": title, "image": ref}), Image(data=data, format=fmt)]
+        return [json.dumps({"source": _c.name, "url": url, "title": title, "image": ref, **({"rights": rights} if rights else {})}),
+                Image(data=data, format=fmt)]
     except ImageRefused as e:
         outcome = e.outcome
         return [e.message]

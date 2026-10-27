@@ -422,6 +422,42 @@ def ric_workspace(slug: str) -> bool:
     return bool(_UUID.match(str(slug)))
 
 
+# Local Contexts labels that ask for material not to be reused (Traditional Knowledge:
+# Secret/Sacred, Community Use Only, Women Restricted, Men Restricted). Analysing it
+# with an assistant is itself such a use, so its files are not handed over.
+NO_REUSE_LABELS = {"tk_s", "tk_co", "tk_wr", "tk_mr"}
+# PREMIS acts that, when disallowed, mean a file may not be shown or passed on.
+NO_SHOW_ACTS = ("render", "disseminate", "use")
+
+
+def ric_rights(*parts: dict | None) -> dict:
+    """OpenRiC Workspace rights (v0.0.59), for a record and one of its
+    instantiations (the later part wins for the same act), as the assistant
+    should read them: the statements, licences and acts in force, the Local
+    Contexts labels, and whether the file may be handed over at all.
+    use: "withheld" (a no-reuse label, or render/disseminate/use disallowed),
+    "conditions" (anything else stated) or "not_stated"."""
+    statements, licences, labels, acts = [], [], [], {}
+    for part in parts:
+        for rule in (part or {}).get("rules") or []:
+            for kind, out in (("statement", statements), ("licence", licences)):
+                v = rule.get(kind)
+                if v and v.get("code") not in [x["code"] for x in out]:
+                    out.append({"code": v.get("code"), "label": v.get("label"), "url": v.get("iri")})
+            for act, g in (rule.get("grants") or {}).items():
+                acts[act] = {"restriction": (g or {}).get("restriction"), **({"note": g["note"]} if (g or {}).get("note") else {})}
+        for lab in (part or {}).get("labels") or []:
+            if lab.get("code") not in [x["code"] for x in labels]:
+                labels.append({"code": lab.get("code"), "label": lab.get("label"), "url": lab.get("iri")})
+    blocked = [x["label"] or x["code"] for x in labels if x["code"] in NO_REUSE_LABELS] + \
+              [f"{a} disallowed" for a in NO_SHOW_ACTS if acts.get(a, {}).get("restriction") == "disallow"]
+    use = "withheld" if blocked else "conditions" if (statements or licences or labels or acts) else "not_stated"
+    out = {"use": use, "statements": statements, "licences": licences, "acts": acts, "labels": labels}
+    if blocked:
+        out["why"] = "; ".join(blocked)
+    return out
+
+
 def ric_files(slug: str, key: str | None) -> dict:
     """A Workspace record's files and published text, per instantiation (v0.0.49):
     only what a visitor may have, never masters; 404 when the record is not public."""

@@ -720,3 +720,56 @@ class WorkspaceFull(Base):
     def test_a_reviewer_key_is_refused_as_service_key(self):
         self.cat.json("GET", f"{WS}/api/ric/v1/proposals", {"total": 0, "results": []})
         self.assertIn("reviewer", keycheck.check(f"https://{WS}", "k", "openric"))
+
+
+class WorkspaceRights(Base):
+    """OpenRiC Workspace v0.0.59: rights and Local Contexts labels with each file."""
+
+    def setUp(self):
+        super().setUp()
+        self.home = settings.Catalogue("WS", f"https://{WS}", f"https://{WS}/api/ric/v1", "openric", "", "X-API-Key", home=True)
+        self._home, calls.HOME, server.HOME = calls.HOME, self.home, self.home
+        settings.CATALOGUES = {"WS": self.home}
+
+    def tearDown(self):
+        calls.HOME, server.HOME = self._home, self._home
+        super().tearDown()
+
+    def files(self, record_rights=None, inst_rights=None):
+        self.cat.json("GET", f"{WS}/api/ric/v1/records/{U}/files", {"record": U, "title": "Panel 6", "rights": record_rights or {"rules": [], "labels": []},
+            "instantiations": [{"id": "i1", "title": "Photo", "rights": inst_rights or {"rules": [], "labels": []},
+                "files": [{"id": "f2", "use": "reference", "mime_type": "image/png", "path": "/discover/files/f2"}],
+                "text": [{"language": "en", "value": "Two eland."}]}]})
+        self.cat.routes[("GET", f"{WS}/discover/files/f2")] = httpx.Response(200, content=PNG, headers={"content-type": "image/png"})
+
+    def test_statement_licence_and_acts_come_with_the_text(self):
+        self.files(inst_rights={"rules": [{"statement": {"iri": "http://rightsstatements.org/vocab/InC-EDU/1.0/", "code": "InC-EDU", "label": "In Copyright - Educational Use Permitted"},
+                                           "licence": None, "grants": {"publish": {"restriction": "conditional", "note": "Ask the archive"}}}], "labels": []})
+        r = server.get_record_text(U)["results"][0]
+        self.assertEqual((r["text"], r["rights"]["use"], r["rights"]["statements"][0]["code"], r["rights"]["acts"]["publish"]["restriction"]),
+                         ("Two eland.", "conditions", "InC-EDU", "conditional"))
+
+    def test_a_secret_sacred_label_withholds_text_and_image(self):
+        self.files(record_rights={"rules": [], "labels": [{"iri": "https://localcontexts.org/label/tk-secret-sacred/", "code": "tk_s", "label": "TK Secret/Sacred"}]})
+        r = server.get_record_text(U)["results"][0]
+        self.assertTrue(r["withheld"])
+        self.assertNotIn("text", r)
+        out = server.get_record_image(U)
+        self.assertEqual(len(out), 1)  # no image part
+        self.assertIn("TK Secret/Sacred", json.loads(out[0])["message"])
+        self.assertFalse([q for q in self.cat.seen if q.url.path == "/discover/files/f2"])  # not even fetched
+
+    def test_a_disallowed_render_withholds_the_image(self):
+        self.files(inst_rights={"rules": [{"grants": {"render": {"restriction": "disallow"}}}], "labels": []})
+        self.assertTrue(json.loads(server.get_record_image(U)[0])["withheld"])
+
+    def test_a_label_that_only_asks_for_attribution_does_not_withhold(self):
+        self.files(record_rights={"rules": [], "labels": [{"iri": "https://localcontexts.org/label/tk-attribution/", "code": "tk_a", "label": "TK Attribution"}]})
+        out = server.get_record_image(U)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(json.loads(out[0])["rights"]["labels"][0]["code"], "tk_a")
+
+    def test_nothing_stated_says_so(self):
+        self.files()
+        self.assertEqual(server.get_record_text(U)["results"][0]["rights"]["use"], "not_stated")
+
