@@ -76,6 +76,10 @@ An outside tester (Catholic Archives UK, stock AtoM with a JavaScript bot check 
 
 27 October 2026, PSIS with atom-ahg-plugins v3.121.89/.90: the API's rights block on real records - artificial-intelligence-4 (In Copyright, CC BY-NC-ND 4.0, TK Attribution, BC Research Use, and the local label BC Consent Before kept as local:BC-CB), the Lekgalong oral history (InC-EDU, CC BY-NC 4.0, TK Community Voice), dog-with-children (In Copyright; its donor holder shown to staff keys only). Through the public MCP, get_record gives visitors the same rights with use: conditions. Labels are identified by their Local Contexts address, then name: the plugin's own code TK-SS means Secret/Sacred (tk_s), not Local Contexts' tk_ss (Seasonal); all 19 seeded labels map correctly.
 
+## Rights on Heratio (v0.9)
+
+27 October 2026, heratio.org v1.164.10 (rights block built by heratio-dev on the same shape): through the hosted Heratio MCP, the Egyptian Boat's get_record carries In Copyright, CC0-1.0 and the labels bc_p, bc_cl and local:bc_cb (BC Consent Before, not a Local Contexts label, kept as local). With Workspace and PSIS, all three catalogue types now pass rights and labels to assistants.
+
 ## OpenRiC Workspace: no bypass (v0.8)
 
 26 October 2026, workspace.openric.org as home catalogue of a signed-in test MCP, with a reviewer's write key (`stuff/test-workspace-v08.sh`): every kind of proposal sent for one record (people, place, date, field change, transcription, translation, relationship). The 12 record tables (record_resources, names, description_values, identifiers, dates, relations, relation_assertions, relation_evidence, instantiations, digital_files, agents, places) were identical by md5 before and after; the proposals table grew (0 to 6, then 6 to 12 on a second run). list_my_proposals listed them as proposed. The relationship, between people with no authority record, came back not queued with Workspace's reason, as its contract says.
