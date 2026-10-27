@@ -72,6 +72,10 @@ An outside tester (Catholic Archives UK, stock AtoM with a JavaScript bot check 
 
 27 October 2026, against OpenRiC Workspace v0.0.59 with two test records set up for the check: "Flower 2" (InC-EDU, publish conditional, TK Attribution on its file) came back with its image and those rights attached; "image 01" (TK Secret/Sacred on the record itself) was withheld: no image, only the rights and "Do not describe or reuse it". Unit tests also show the image of a withheld file is never fetched, and that a disallowed render withholds it.
 
+## Rights on PSIS (v0.9)
+
+27 October 2026, PSIS with atom-ahg-plugins v3.121.89/.90: the API's rights block on real records - artificial-intelligence-4 (In Copyright, CC BY-NC-ND 4.0, TK Attribution, BC Research Use, and the local label BC Consent Before kept as local:BC-CB), the Lekgalong oral history (InC-EDU, CC BY-NC 4.0, TK Community Voice), dog-with-children (In Copyright; its donor holder shown to staff keys only). Through the public MCP, get_record gives visitors the same rights with use: conditions. Labels are identified by their Local Contexts address, then name: the plugin's own code TK-SS means Secret/Sacred (tk_s), not Local Contexts' tk_ss (Seasonal); all 19 seeded labels map correctly.
+
 ## OpenRiC Workspace: no bypass (v0.8)
 
 26 October 2026, workspace.openric.org as home catalogue of a signed-in test MCP, with a reviewer's write key (`stuff/test-workspace-v08.sh`): every kind of proposal sent for one record (people, place, date, field change, transcription, translation, relationship). The 12 record tables (record_resources, names, description_values, identifiers, dates, relations, relation_assertions, relation_evidence, instantiations, digital_files, agents, places) were identical by md5 before and after; the proposals table grew (0 to 6, then 6 to 12 on a second run). list_my_proposals listed them as proposed. The relationship, between people with no authority record, came back not queued with Workspace's reason, as its contract says.
