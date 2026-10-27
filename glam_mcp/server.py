@@ -507,8 +507,7 @@ def get_record_image(slug: str, catalogue: str = "", ctx: Context | None = None)
         else:
             rec = _read_ahg(slug, key)  # the API decides whether this caller may see the record and its files
             title, url = rec["title"], rec["url"]
-            if rec.get("rights") is not None:
-                rights = adapters.ric_rights(rec["rights"])
+            rights = rec.get("rights")  # already summarised by the adapter
             ref = next((i.get("reference") or i.get("thumbnail") for i in rec["images"] if i.get("reference") or i.get("thumbnail")), None)
         if ref and rights and "withheld" == rights["use"]:
             outcome = "withheld"

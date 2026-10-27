@@ -138,7 +138,7 @@ def _read_ahg(slug: str, key: str | None) -> dict:
         "provenance": d.get("provenance"),
         # Rights and Local Contexts labels (AHG API, Workspace shape); absent on
         # catalogues whose API predates them.
-        "rights": d.get("rights"),
+        "rights": ric_rights(d["rights"]) if d.get("rights") is not None else None,
         "images": [
             {"thumbnail": _file_url(o.get("thumbnail_url")), "reference": _file_url(o.get("reference_url")),
              "iiif_manifest": f"{_c.public_base}/iiif/manifest/{slug}"}
