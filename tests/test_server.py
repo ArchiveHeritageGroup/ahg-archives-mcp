@@ -289,6 +289,67 @@ class Proposals(Base):
         self.assertEqual(calls._budget("k2", 5), 0)  # each key has its own hour
 
 
+class ConditionFlags(Base):
+    """propose_condition (heratio#1558): a condition flag goes to the review queue
+    as a "conditions" proposal; a catalogue without condition flags says so."""
+
+    def setUp(self):
+        super().setUp()
+        # Its own key: the hourly proposal cap is counted per key, on disk, across tests.
+        calls._caller_key, self._real_key = (lambda ctx: "condition-key"), calls._caller_key
+        self.addCleanup(lambda: setattr(calls, "_caller_key", self._real_key))
+
+    def test_a_flag_is_queued_with_its_damages(self):
+        self.cat.json("POST", "cat.example.org/api/v2/descriptions/s/proposals",
+                      {"data": {"conditions": [{"id": 7, "grade": "poor", "damages": 1}], "condition_review_url": f"{HOME}/admin/ai/condition/browse?status=pending"}}, 201)
+        r = server.propose_condition("s", "Tear along the lower fold.", grade="Poor",
+                                     damages=[server.Damage(type="Tear", severity="moderate", description="4 cm", confidence=0.8)])
+        self.assertTrue(r["queued"])
+        self.assertEqual(r["review_url"], f"{HOME}/admin/ai/condition/browse?status=pending")
+        q = next(q for q in self.cat.seen if q.method == "POST")
+        sent = json.loads(q.content)
+        self.assertEqual((sent["source"], q.headers["X-API-Key"]), ("glam-mcp", "condition-key"))
+        self.assertEqual(sent["conditions"][0]["grade"], "poor")
+        self.assertEqual(sent["conditions"][0]["damages"][0], {"type": "tear", "severity": "moderate", "location": "", "description": "4 cm", "confidence": 0.8})
+
+    def test_a_catalogue_without_condition_flags_says_so(self):
+        # An AHG API from before condition flags (PSIS) wants entities or fields instead.
+        self.cat.json("POST", "cat.example.org/api/v2/descriptions/s/proposals",
+                      {"message": "entities (a list of {type, value}), fields (a list of {field, text}), transcripts or relationships is required"}, 400)
+        r = server.propose_condition("s", "Foxing on the right margin.", grade="fair")
+        self.assertEqual((r["queued"], r["error"]), (False, "unsupported"))
+
+    def test_a_refused_value_passes_the_catalogues_reason(self):
+        self.cat.json("POST", "cat.example.org/api/v2/descriptions/s/proposals",
+                      {"message": "Condition 0, damage 0: type must be one of tear, stain, foxing"}, 400)
+        r = server.propose_condition("s", "Something", damages=[server.Damage(type="smudge")])
+        self.assertIn("must be one of tear, stain, foxing", r["message"])
+
+    def test_a_note_is_required(self):
+        r = server.propose_condition("s", "   ", grade="poor")
+        self.assertFalse(r["queued"])
+        self.assertEqual([q for q in self.cat.seen if q.method == "POST"], [])
+
+
+class RicRead(Base):
+    """ric_query (heratio#1558): the AHG API's gated RiC read, passed through."""
+
+    def test_the_ric_read_is_passed_through_with_its_link(self):
+        self.cat.json("GET", "cat.example.org/api/v2/descriptions/s/ric",
+                      {"data": {"@type": "rico:RecordSet", "rico:title": "A fonds", "url": f"{HOME}/s", "rico:hasOrHadPart": [{"@id": f"{HOME}/p"}]}})
+        r = server.ric_query("s")
+        self.assertEqual((r["found"], r["url"], r["ric"]["rico:hasOrHadPart"][0]["@id"]), (True, f"{HOME}/s", f"{HOME}/p"))
+
+    def test_a_redacted_record_passes_the_catalogues_reason(self):
+        self.cat.json("GET", "cat.example.org/api/v2/descriptions/s/ric", {"message": "This record has redacted fields; read it with GET /api/v2/descriptions/s"}, 403)
+        r = server.ric_query("s")
+        self.assertFalse(r["found"])
+        self.assertIn("redacted fields", r["message"])
+
+    def test_not_visible_answers_like_any_missing_record(self):
+        self.assertEqual(server.ric_query("hidden")["message"], "No visible record with that reference.")
+
+
 class KeyCheck(Base):
     def test_staff_key_refused(self):
         self.cat.json("GET", "cat.example.org/api/v2/proposals", {"data": {"results": []}})
@@ -519,7 +580,7 @@ class ToolAnnotationHints(unittest.TestCase):
 
     def test_every_tool_is_annotated(self):
         tools = server.mcp._tool_manager.list_tools()
-        self.assertEqual(len(tools), 16)
+        self.assertEqual(len(tools), 18)
         for t in tools:
             a = t.annotations
             self.assertIsNotNone(a, t.name)

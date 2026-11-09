@@ -70,6 +70,7 @@ from glam_mcp import calls
 from glam_mcp import catalogue as adapters
 from glam_mcp.calls import _budget, _caller_key, _logged, _needs_key, _read_key, _unknown_catalogue
 from glam_mcp.catalogue import (
+    Refused,
     _api,
     _fetch_image,
     _import_csv,
@@ -139,7 +140,10 @@ mcp = FastMCP(
         "and call propose_access_points_and_dates; for relationships between people stated in the record "
         "(married to, child of), call propose_relationships after proposing both names; for a scanned page with no text "
         "call propose_transcription, and for text in another language propose_translation; for text fields call "
-        "propose_description_change. Give evidence and source URLs for everything, especially facts "
+        "propose_description_change; to see a record in the ICA's Records in Contexts model, or how it sits in its "
+        "fonds, call ric_query; for damage or deterioration you can see on a record's image (tears, stains, "
+        "foxing, losses), call propose_condition for a conservator to confirm or dismiss. "
+        "Give evidence and source URLs for everything, especially facts "
         "found on the web. Proposals are reviewed by an archivist; never describe them as saved."
         + (" Other catalogues can be searched and read too (list_catalogues; search_records with catalogue=\"all\"): "
            "read each result with the catalogue it came from, and never propose changes to a record from another catalogue, "
@@ -447,6 +451,33 @@ def get_record_text(slug: str, offset: int = 0, limit: int = 20000, catalogue: s
     return _logged("get_record_text", args, ctx, run)
 
 
+@tool()
+def ric_query(slug: str, catalogue: str = "", ctx: Context | None = None) -> dict:
+    """Read a record as Records in Contexts (RiC-O 1.1 JSON-LD): its RiC type,
+    title, dates, creators, subjects, holder, and the record it is part of and
+    its parts, each with a link you can follow with get_record or ric_query.
+
+    Use it to see how a record sits in its fonds or series, or to give its
+    description in the ICA's RiC model. Only what the caller may see is listed:
+    unpublished or restricted parts are left out, not marked. A record with
+    redacted fields is refused here; read it with get_record, which applies the
+    redaction. Files are not included: use get_record_text or get_record_image.
+    Heratio only; on OpenRiC every get_record answer is already RiC.
+    """
+    key = _read_key(ctx, catalogue)
+    args = {"slug": slug, "catalogue": catalogue}
+
+    def run():
+        if _c.backend == "openric":
+            return {"found": False, "error": "unsupported", "source": _c.name,
+                    "message": "This catalogue describes everything in RiC already: use get_record."}
+        if _c.backend != "atom-ahg":
+            return {"found": False, "error": "unsupported", "source": _c.name, "message": "This catalogue's API does not publish RiC."}
+        d = _api("GET", f"/descriptions/{slug}/ric", key)
+        return {"found": True, "source": _c.name, "url": d.get("url") or _url(slug), "ric": d}
+    return _logged("ric_query", args, ctx, run)
+
+
 def _ric_text(slug: str, key: str | None, offset: int, limit: int) -> dict:
     """OpenRiC Workspace: the published transcript of each online instantiation,
     in the same shape as the AHG API's file text."""
@@ -575,13 +606,14 @@ class Proposal(BaseModel):
 
 
 @tool()
-def list_my_proposals(status: Literal["pending", "approved", "edited", "linked", "rejected", "new_record_created", "parked"] | None = None,
+def list_my_proposals(status: Literal["pending", "approved", "edited", "linked", "rejected", "new_record_created", "parked", "confirmed", "dismissed"] | None = None,
                       limit: int = 25, skip: int = 0, ctx: Context | None = None) -> dict:
     """List the proposals you made and what became of them, newest first.
 
     Each shows the record, the name, place, date or field text proposed, and its
     status: pending, approved, edited, linked (to an authority record), rejected,
-    new_record_created or parked, with who reviewed it and when. Check it before
+    new_record_created or parked (condition flags: confirmed or dismissed), with
+    who reviewed it and when. Check it before
     proposing for a record, and do not propose again what was rejected. Needs the
     archivist's own staff key.
     """
@@ -727,6 +759,72 @@ def propose_relationships(slug: str, relationships: list[Relationship], ctx: Con
                         if any(r.get("queued") for r in results) else "Nothing new was queued; see each result."),
         }
     return _logged("propose_relationships", args, ctx, run)
+
+
+class Damage(BaseModel):
+    type: str = Field(description='The kind of damage, as the catalogue names it, e.g. "tear", "stain", "foxing", "fading", "missing_part". '
+                                  "If a value is refused, the reply lists the ones this catalogue accepts.")
+    severity: str = Field("", description='How bad it is, e.g. "minor", "moderate", "severe" (optional).')
+    location: str = Field("", description="Where on the item, from the catalogue's location zones (optional).")
+    description: str = Field("", description='What you see, e.g. "4 cm tear along the lower fold".')
+    confidence: float | None = Field(None, ge=0, le=1, description="How sure you are, 0 to 1 (optional).")
+
+
+@tool(PROPOSE)
+def propose_condition(
+    slug: str,
+    note: str,
+    grade: str = "",
+    damages: list[Damage] | None = None,
+    digital_object_id: int | None = None,
+    evidence: str = "",
+    sources: list[str] | None = None,
+    ctx: Context | None = None,
+) -> dict:
+    """Flag the physical condition of a record's item, for a conservator to confirm or dismiss.
+
+    Use it for damage or deterioration you can see on the record's image
+    (get_record_image): tears, stains, foxing, fading, losses, mould. note says
+    what you saw and where, plainly; it is required. grade is an overall
+    condition such as "good", "fair" or "poor", and damages list what is wrong;
+    give a grade, damages or both. Only flag what the image shows; say so when
+    the image is too small or unclear to judge. Nothing on the record changes:
+    on Heratio the flag waits under AI > Condition as an unconfirmed assessment.
+    Needs the archivist's own staff key.
+    """
+    damages = damages or []
+    args = {"slug": slug, "grade": grade, "damages": len(damages)}
+
+    def run():
+        key = _needs_key(ctx)
+        if not note.strip():
+            return {"queued": False, "message": "Say what you saw in note; nothing was flagged.", "source": _c.name}
+        _budget(key, 1)
+        unsupported = {"source": _c.name, "url": _url(slug), "queued": False, "error": "unsupported",
+                       "message": "This catalogue does not take condition flags, so nothing was saved. Tell the archivist what you saw."}
+        # Condition flags exist only on the AHG API (Heratio); PSIS and stock AtoM say so below.
+        if _c.backend != "atom-ahg" or not (path := _queue_path(slug)):
+            return unsupported
+        flag = {"note": note.strip(), "grade": grade.strip().lower(), "evidence": evidence, "sources": sources or [],
+                "damages": [{"type": d.type.strip().lower(), "severity": d.severity.strip().lower(), "location": d.location.strip().lower(),
+                             "description": d.description, **({"confidence": d.confidence} if d.confidence is not None else {})} for d in damages]}
+        if digital_object_id:
+            flag["digital_object_id"] = digital_object_id
+        try:
+            out = _api("POST", path, key, json={"source": "glam-mcp", "conditions": [flag]})
+        except Refused as e:
+            # An AHG API from before condition flags answers that it wants entities or fields instead.
+            if "required" in str(e) and "condition" not in str(e):
+                return unsupported
+            raise
+        queued = out.get("conditions") or []
+        return {
+            "source": _c.name, "url": _url(slug), "queued": bool(queued), "results": queued,
+            "review_url": out.get("condition_review_url") or _review_url("/admin/ai/condition/browse?status=pending"),
+            "message": ("Flagged for a conservator. Nothing changes until it is confirmed."
+                        if queued else "Nothing new was flagged: the same note is already waiting for review."),
+        }
+    return _logged("propose_condition", args, ctx, run)
 
 
 @tool(PROPOSE)
