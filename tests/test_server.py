@@ -464,6 +464,26 @@ class Health(Base):
         catalogue._client = httpx.Client(transport=httpx.MockTransport(down))
         self.assertEqual(self._health(None), (503, "unreachable"))
 
+    def test_one_dropped_read_is_retried(self):
+        calls = []
+        def flaky(request):
+            calls.append(1)
+            if len(calls) == 1:
+                raise httpx.RemoteProtocolError("Server disconnected")
+            return httpx.Response(200, json={"data": {"results": []}})
+        catalogue._client = httpx.Client(transport=httpx.MockTransport(flaky))
+        self.assertEqual(self._health(None), (200, "ok"))
+        self.assertEqual(len(calls), 2)
+
+    def test_refused_key_is_not_retried(self):
+        calls = []
+        def refused(request):
+            calls.append(1)
+            return httpx.Response(403, json={"message": "Read scope required"})
+        catalogue._client = httpx.Client(transport=httpx.MockTransport(refused))
+        self.assertEqual(self._health(None), (503, "key_refused"))
+        self.assertEqual(len(calls), 1)
+
 
 class DataFolder(unittest.TestCase):
     def test_signed_in_service_needs_a_writable_data_folder(self):

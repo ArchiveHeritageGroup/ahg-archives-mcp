@@ -197,6 +197,7 @@ The signed-in service serves a staff page at `/usage`: calls per day, per tool, 
 
 ## Versions
 
+- **v0.9.4** (22 Nov 2026): `/healthz` retries one failed catalogue read and logs the status or error type, so a single dropped read no longer raises an alert. A refused key is not retried.
 - **v0.9.3** (9 Nov 2026): two Heratio tools. `propose_condition` flags damage or deterioration seen on a record's image (grade, damages, a note on what was seen) for a conservator to confirm or dismiss; it needs Heratio v1.164.60, and PSIS says it takes no condition flags. `ric_query` reads a record in Records in Contexts (RiC-O 1.1 JSON-LD) with only the parent and parts the caller may see; it needs Heratio v1.164.61 and refuses records with redacted fields. `list_my_proposals` also reports condition flags as confirmed or dismissed. 86 unit tests.
 - **v0.9.2** (27 Oct 2026): every tool declares the four MCP tool annotations, so a client can tell reads from writes: the eleven read tools are read-only and idempotent; the five propose tools are not read-only, never destructive (a proposal only joins the review queue) and not idempotent. None is open-world. 79 unit tests.
 - **v0.9.1** (27 Oct 2026): rights and Local Contexts labels from AtoM with the AHG Extensions too (atom-ahg-plugins v3.121.89, the API rights block; Heratio to follow), in get_record as well as with files; rights the catalogue cannot read withhold the file. 78 unit tests.

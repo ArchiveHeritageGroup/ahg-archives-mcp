@@ -54,6 +54,7 @@ This module is the MCP layer: the tools, sign-in and the web routes. The rest:
 import functools
 import json
 import os
+import sys
 import time
 from collections import defaultdict
 from typing import Any, Literal
@@ -957,12 +958,17 @@ def propose_translation(
 async def healthz(request: Request) -> JSONResponse:
     """ok only when the catalogue answers a real read with the service key;
     otherwise unreachable, key_refused or not_working, with 503."""
-    try:
-        r = adapters._client.get(_c.api_base + BACKENDS[_c.backend][2],
-                                 headers={_c.key_header: _c.key})
-        state = "ok" if r.status_code == 200 else "key_refused" if r.status_code in (401, 403) else "not_working"
-    except Exception:
-        state = "unreachable"
+    for attempt in (1, 2):  # one retry, so a single dropped read does not raise an alert
+        try:
+            r = adapters._client.get(_c.api_base + BACKENDS[_c.backend][2],
+                                     headers={_c.key_header: _c.key})
+            state = "ok" if r.status_code == 200 else "key_refused" if r.status_code in (401, 403) else "not_working"
+            if r.status_code < 500:
+                break
+            print(f"healthz read {attempt} failed: HTTP {r.status_code}", file=sys.stderr, flush=True)
+        except Exception as e:
+            state = "unreachable"
+            print(f"healthz read {attempt} failed: {type(e).__name__}", file=sys.stderr, flush=True)
     return JSONResponse({"status": state, "backend": _c.backend, "auth": AUTH_MODE, "source": _c.name, "api": state == "ok"},
                         status_code=200 if state == "ok" else 503)
 
