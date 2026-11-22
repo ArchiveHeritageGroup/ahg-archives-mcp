@@ -6,6 +6,11 @@
 # Services to check: GLAM_HEALTH_URLS (space-separated), default the two on this host
 # plus both services of every hosted client (clients/*/.env, made by client.sh).
 # State is kept in ~/.cache/glam-mcp-health/.
+# Planned downtime: the weekly Heratio demo reset runs Sunday from 02:20 SAST and puts the
+# catalogue in maintenance mode. Skip those runs and leave the saved state alone, so a
+# reset raises no alert, while a fault still there at 02:30 alerts as normal.
+now=$(TZ=Africa/Johannesburg date +%u%H%M)
+[ "$now" -ge 70220 ] && [ "$now" -lt 70230 ] && exit 0
 if [ -z "${GLAM_HEALTH_URLS:-}" ]; then
   GLAM_HEALTH_URLS="http://127.0.0.1:8031/healthz http://127.0.0.1:8032/healthz"
   for f in "$(dirname "$0")"/../clients/*/.env; do
